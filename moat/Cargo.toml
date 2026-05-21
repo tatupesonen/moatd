@@ -1,0 +1,37 @@
+[package]
+name = "moat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "moat"
+path = "src/bin/moat.rs"
+
+[[bin]]
+name = "moatd"
+path = "src/bin/moatd.rs"
+
+[dependencies]
+moat-common = { workspace = true, features = ["user"] }
+aya = { workspace = true }
+aya-log = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-journald = { workspace = true }
+sd-notify = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+
+[build-dependencies]
+aya-build = { workspace = true }
+anyhow = { workspace = true }
+cargo_metadata = { workspace = true }

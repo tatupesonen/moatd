@@ -1,0 +1,39 @@
+[Unit]
+Description=moat eBPF firewall
+Documentation=https://github.com/tatupesonen/moat
+DefaultDependencies=no
+After=network-pre.target systemd-modules-load.service
+Before=network.target shutdown.target
+Conflicts=shutdown.target
+Wants=network-pre.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/sbin/moatd
+Restart=on-failure
+RestartSec=2s
+
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+ReadWritePaths=/sys/fs/bpf /run/moatd /var/lib/moat /etc/moat
+RuntimeDirectory=moatd
+RuntimeDirectoryMode=0750
+StateDirectory=moat
+StateDirectoryMode=0750
+ConfigurationDirectory=moat
+ConfigurationDirectoryMode=0750
+SystemCallFilter=@system-service @network-io bpf
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

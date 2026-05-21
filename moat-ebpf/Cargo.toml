@@ -1,0 +1,19 @@
+[package]
+name = "moat-ebpf"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+moat-common = { path = "../moat-common", default-features = false }
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+network-types = "0.0.7"
+
+[build-dependencies]
+which = { version = "8", default-features = false, features = ["real-sys"] }
+
+[[bin]]
+name = "moat"
+path = "src/main.rs"

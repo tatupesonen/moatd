@@ -1,0 +1,14 @@
+[package]
+name = "moat-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+user = ["dep:aya", "dep:serde"]
+
+[dependencies]
+aya = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
