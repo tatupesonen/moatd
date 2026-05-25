@@ -125,16 +125,69 @@ pub mod control {
 
     pub const SOCKET_PATH: &str = "/run/moatd/control.sock";
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Direction {
+        #[default]
+        In,
+        Out,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Action {
+        #[default]
+        Allow,
+        Deny,
+        Reject,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Protocol {
+        Tcp,
+        Udp,
+        Icmp,
+        #[default]
+        Any,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct UserRule {
+        pub direction: Direction,
+        pub action: Action,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub iface: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub proto: Option<Protocol>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub src: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dst: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub src_port: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dst_port: Option<String>,
+    }
+
     #[derive(Debug, Serialize, Deserialize)]
     pub enum Request {
-        Status,
         Ping,
+        Status,
+        ListRules,
+        AddRule(UserRule),
+        DeleteRule(u32),
+        SetDefault { direction: Direction, action: Action },
+        SetLogging { enabled: bool },
+        Reset,
     }
 
     #[derive(Debug, Serialize, Deserialize)]
     pub enum Response {
-        Status(StatusReport),
         Pong,
+        Ok,
+        Status(StatusReport),
+        Rules(Vec<UserRule>),
         Err(String),
     }
 
@@ -144,5 +197,8 @@ pub mod control {
         pub attached_interfaces: Vec<String>,
         pub rules: u32,
         pub schema_version: u8,
+        pub default_in: Action,
+        pub default_out: Action,
+        pub logging_enabled: bool,
     }
 }
