@@ -27,6 +27,9 @@ pub const FAMILY_V6: u8 = 6;
 pub const IFACE_ANY: u32 = 0;
 pub const IFACE_ABSENT: u32 = u32::MAX;
 
+pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
+pub const CONNTRACK_TTL_NS: u64 = 60_000_000_000;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct IpCidr {
@@ -110,6 +113,23 @@ pub struct GlobalConfig {
     pub _pad: [u8; 6],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ConnKey {
+    pub proto: u8,
+    pub _pad: [u8; 3],
+    pub src_addr_be: u32,
+    pub dst_addr_be: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ConnVal {
+    pub last_seen_ns: u64,
+}
+
 #[cfg(feature = "user")]
 mod aya_impls {
     use super::*;
@@ -117,6 +137,8 @@ mod aya_impls {
     unsafe impl aya::Pod for IpCidr {}
     unsafe impl aya::Pod for DropEvent {}
     unsafe impl aya::Pod for GlobalConfig {}
+    unsafe impl aya::Pod for ConnKey {}
+    unsafe impl aya::Pod for ConnVal {}
 }
 
 #[cfg(feature = "user")]

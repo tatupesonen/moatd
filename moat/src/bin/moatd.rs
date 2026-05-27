@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use aya::{
     include_bytes_aligned,
     maps::{Array, MapData},
-    programs::{Xdp, XdpFlags},
+    programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
     Ebpf,
 };
 use moat_common::control::{Action, Direction, Request, Response, StatusReport, UserRule, SOCKET_PATH};
@@ -21,7 +21,8 @@ use tracing_subscriber::EnvFilter;
 use moat::store::{self, OnDisk, RULES_FILE};
 use moat::wire;
 
-const PROG_NAME: &str = "moat_ingress";
+const XDP_PROG: &str = "moat_ingress";
+const TC_PROG: &str = "moat_egress";
 const MAX_FRAME_BYTES: usize = 1 << 20;
 
 struct Maps {
@@ -47,21 +48,38 @@ async fn main() -> Result<()> {
         warn!(error = %e, "eBPF logger init failed");
     }
 
-    let prog: &mut Xdp = ebpf
-        .program_mut(PROG_NAME)
-        .with_context(|| format!("program {PROG_NAME} not found"))?
-        .try_into()?;
-    prog.load().context("loading XDP program into kernel")?;
-
     let interfaces = enumerate_interfaces()?;
-    let mut attached = Vec::new();
-    for iface in &interfaces {
-        match attach_xdp_with_fallback(prog, iface) {
-            Ok(mode) => {
-                info!(iface, mode, "XDP attached");
-                attached.push(iface.clone());
+
+    {
+        let prog: &mut Xdp = ebpf
+            .program_mut(XDP_PROG)
+            .with_context(|| format!("program {XDP_PROG} not found"))?
+            .try_into()?;
+        prog.load().context("loading XDP program into kernel")?;
+        for iface in &interfaces {
+            match attach_xdp_with_fallback(prog, iface) {
+                Ok(mode) => info!(iface, mode, "XDP attached"),
+                Err(e) => warn!(iface, error = %e, "XDP attach failed"),
             }
-            Err(e) => warn!(iface, error = %e, "XDP attach failed"),
+        }
+    }
+
+    let mut attached = Vec::new();
+    {
+        let tc_prog: &mut SchedClassifier = ebpf
+            .program_mut(TC_PROG)
+            .with_context(|| format!("program {TC_PROG} not found"))?
+            .try_into()?;
+        tc_prog.load().context("loading TC program into kernel")?;
+        for iface in &interfaces {
+            let _ = tc::qdisc_add_clsact(iface);
+            match tc_prog.attach(iface, TcAttachType::Egress) {
+                Ok(_) => {
+                    info!(iface, "TC egress attached");
+                    attached.push(iface.clone());
+                }
+                Err(e) => warn!(iface, error = %e, "TC egress attach failed"),
+            }
         }
     }
 
@@ -147,12 +165,21 @@ fn enumerate_interfaces() -> Result<Vec<String>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir("/sys/class/net").context("reading /sys/class/net")? {
         let name = entry?.file_name().to_string_lossy().into_owned();
-        if name == "lo" || name.starts_with("docker") || name.starts_with("virbr") {
+        if is_skipped_iface(&name) {
             continue;
         }
         out.push(name);
     }
     Ok(out)
+}
+
+fn is_skipped_iface(name: &str) -> bool {
+    name == "lo"
+        || name.starts_with("docker")
+        || name.starts_with("virbr")
+        || name.starts_with("br-")
+        || name.starts_with("veth")
+        || name.starts_with("ipvl")
 }
 
 fn attach_xdp_with_fallback(prog: &mut Xdp, iface: &str) -> Result<&'static str> {
