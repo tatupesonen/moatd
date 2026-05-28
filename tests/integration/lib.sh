@@ -61,7 +61,8 @@ setup_netns() {
 
 start_moatd() {
     rm -f /run/moatd/control.sock
-    ip netns exec "$NS_H" env MOAT_INTERFACES="$IFACE_H" "$MOATD_BIN" daemon \
+    local ifaces="${MOAT_IFACES:-$IFACE_H}"
+    ip netns exec "$NS_H" env MOAT_INTERFACES="$ifaces" "$MOATD_BIN" daemon \
         > "/tmp/moatd-${NS_H}.log" 2>&1 &
     MOATD_PID=$!
     for _ in $(seq 1 50); do
