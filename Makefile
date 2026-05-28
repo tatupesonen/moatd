@@ -3,11 +3,11 @@ SBIN   ?= $(PREFIX)/sbin
 BIN    ?= $(PREFIX)/bin
 UNIT   ?= /etc/systemd/system
 MOD    ?= /etc/modules-load.d
-ETC    ?= /etc/moat
+ETC    ?= /etc/moatd
 
 CARGO ?= cargo
 
-.PHONY: build release install uninstall clean
+.PHONY: build release install uninstall clean test integration-test
 
 build:
 	$(CARGO) build
@@ -24,7 +24,7 @@ install: release
 	install -m 0755 target/release/moatd $(DESTDIR)$(SBIN)/moatd
 	install -m 0755 target/release/moat  $(DESTDIR)$(BIN)/moat
 	install -m 0644 dist/moatd.service   $(DESTDIR)$(UNIT)/moatd.service
-	install -m 0644 dist/modules-load.d/moat.conf $(DESTDIR)$(MOD)/moat.conf
+	install -m 0644 dist/modules-load.d/moatd.conf $(DESTDIR)$(MOD)/moatd.conf
 	@echo
 	@echo "moat installed. Run:"
 	@echo "  sudo systemctl daemon-reload"
@@ -34,7 +34,21 @@ uninstall:
 	rm -f $(DESTDIR)$(SBIN)/moatd
 	rm -f $(DESTDIR)$(BIN)/moat
 	rm -f $(DESTDIR)$(UNIT)/moatd.service
-	rm -f $(DESTDIR)$(MOD)/moat.conf
+	rm -f $(DESTDIR)$(MOD)/moatd.conf
+
+test:
+	$(CARGO) test -p moatd -p moatd-common
+
+integration-test:
+	@if [ ! -x target/debug/moatd ] || [ ! -x target/debug/moat ]; then \
+		echo "moatd / moat binaries missing. Run 'cargo build' (without sudo) first."; \
+		exit 1; \
+	fi
+	@if [ "$$(id -u)" -ne 0 ]; then \
+		echo "integration-test needs root (uses ip netns). Re-run with sudo."; \
+		exit 1; \
+	fi
+	tests/integration/run.sh
 
 clean:
 	$(CARGO) clean

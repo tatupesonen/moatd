@@ -10,7 +10,7 @@ use aya_ebpf::{
     maps::{Array, LruHashMap},
     programs::{TcContext, XdpContext},
 };
-use moat_common::{
+use moatd_common::{
     ConnKey, ConnVal, GlobalConfig, IpCidr, Rule, ACT_ALLOW, CONNTRACK_MAX_ENTRIES,
     CONNTRACK_TTL_NS, DIR_IN, DIR_OUT, FAMILY_V4, FAMILY_V6, IFACE_ANY, POLICY_IN, POLICY_OUT,
     PROTO_ANY, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, RULES_MAX,
@@ -70,7 +70,11 @@ pub fn moat_egress(ctx: TcContext) -> i32 {
 
 #[inline(always)]
 unsafe fn ptr_at_data<T>(data: usize, data_end: usize, offset: usize) -> Result<*const T, ()> {
-    if data + offset + mem::size_of::<T>() > data_end {
+    let end = data
+        .checked_add(offset)
+        .and_then(|x| x.checked_add(mem::size_of::<T>()))
+        .ok_or(())?;
+    if end > data_end {
         return Err(());
     }
     Ok((data + offset) as *const T)
@@ -101,7 +105,8 @@ fn try_ingress(ctx: &XdpContext) -> Result<u32, ()> {
     };
     if let Some(v) = unsafe { CONNTRACK.get(&reverse_key) } {
         if now.saturating_sub(v.last_seen_ns) < CONNTRACK_TTL_NS {
-            let _ = CONNTRACK.insert(&reverse_key, &ConnVal { last_seen_ns: now }, 0);
+            // Intentionally no refresh on ingress: only the egress side keeps the
+            // entry alive. Otherwise a spoofed reply could indefinitely renew it.
             return Ok(xdp_action::XDP_PASS);
         }
     }
@@ -159,7 +164,9 @@ fn is_ndp(p: &Parsed) -> bool {
 #[inline(always)]
 fn parse_packet(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
     let eth: *const EthHdr = unsafe { ptr_at_data(data, data_end, 0)? };
-    match unsafe { (*eth).ether_type } {
+    let ether_type =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*eth).ether_type)) };
+    match ether_type {
         EtherType::Ipv4 => parse_v4(data, data_end),
         EtherType::Ipv6 => parse_v6(data, data_end),
         _ => Ok(None),
@@ -169,11 +176,11 @@ fn parse_packet(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
 #[inline(always)]
 fn parse_v4(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
     let ipv4: *const Ipv4Hdr = unsafe { ptr_at_data(data, data_end, EthHdr::LEN)? };
-    let src_be = unsafe { (*ipv4).src_addr };
-    let dst_be = unsafe { (*ipv4).dst_addr };
-    let ip_proto = unsafe { (*ipv4).proto };
+    let src_be = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ipv4).src_addr)) };
+    let dst_be = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ipv4).dst_addr)) };
+    let ip_proto = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ipv4).proto)) };
     let ihl = unsafe { (*ipv4).ihl() } as usize;
-    if ihl < 5 {
+    if !(5..=15).contains(&ihl) {
         return Err(());
     }
     let l4_off = EthHdr::LEN + ihl * 4;
@@ -200,7 +207,7 @@ fn parse_v4(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
 #[inline(always)]
 fn parse_v6(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
     let ipv6: *const Ipv6Hdr = unsafe { ptr_at_data(data, data_end, EthHdr::LEN)? };
-    let next_hdr = unsafe { (*ipv6).next_hdr };
+    let next_hdr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ipv6).next_hdr)) };
     let src_addr: [u8; 16] = unsafe { (*ipv6).src_addr.in6_u.u6_addr8 };
     let dst_addr: [u8; 16] = unsafe { (*ipv6).dst_addr.in6_u.u6_addr8 };
     let l4_off = EthHdr::LEN + Ipv6Hdr::LEN;
@@ -230,26 +237,20 @@ fn parse_l4(
     Ok(match proto {
         IpProto::Tcp => {
             let tcp: *const TcpHdr = unsafe { ptr_at_data(data, data_end, l4_off)? };
-            (
-                u16::from_be(unsafe { (*tcp).source }),
-                u16::from_be(unsafe { (*tcp).dest }),
-                PROTO_TCP,
-                0,
-            )
+            let source = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*tcp).source)) };
+            let dest = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*tcp).dest)) };
+            (u16::from_be(source), u16::from_be(dest), PROTO_TCP, 0)
         }
         IpProto::Udp => {
             let udp: *const UdpHdr = unsafe { ptr_at_data(data, data_end, l4_off)? };
-            (
-                u16::from_be(unsafe { (*udp).source }),
-                u16::from_be(unsafe { (*udp).dest }),
-                PROTO_UDP,
-                0,
-            )
+            let source = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*udp).source)) };
+            let dest = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*udp).dest)) };
+            (u16::from_be(source), u16::from_be(dest), PROTO_UDP, 0)
         }
         IpProto::Icmp if !is_v6 => (0, 0, PROTO_ICMP, 0),
         IpProto::Ipv6Icmp if is_v6 => {
             let ty_ptr: *const u8 = unsafe { ptr_at_data(data, data_end, l4_off)? };
-            (0, 0, PROTO_ICMPV6, unsafe { *ty_ptr })
+            (0, 0, PROTO_ICMPV6, unsafe { core::ptr::read_unaligned(ty_ptr) })
         }
         _ => (0, 0, PROTO_ANY, 0),
     })
@@ -257,6 +258,12 @@ fn parse_l4(
 
 #[inline(always)]
 fn cidr_contains(cidr: &IpCidr, addr: &[u8; 16], family: u8) -> bool {
+    // A wildcard CIDR (prefix 0) matches any family, mirroring ufw semantics where
+    // a rule without src/dst should match both v4 and v6. Explicit non-wildcard
+    // CIDRs still enforce a family match.
+    if cidr.prefix == 0 {
+        return true;
+    }
     if cidr.family != family {
         return false;
     }

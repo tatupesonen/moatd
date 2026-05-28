@@ -10,8 +10,8 @@ fn main() -> Result<()> {
 
     let ebpf_pkg = packages
         .into_iter()
-        .find(|Package { name, .. }| name.as_str() == "moat-ebpf")
-        .ok_or_else(|| anyhow!("moat-ebpf package not found in workspace"))?;
+        .find(|Package { name, .. }| name.as_str() == "moatd-ebpf")
+        .ok_or_else(|| anyhow!("moatd-ebpf package not found in workspace"))?;
 
     let Package {
         name,

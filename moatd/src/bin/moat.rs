@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use moat_common::control::{Action, Request, Response, UserRule, SOCKET_PATH};
+use moatd_common::control::{Action, Request, Response, UserRule, SOCKET_PATH};
 
-use moat::parser;
+use moatd::parser;
 
 const MAX_FRAME_BYTES: usize = 1 << 20;
 

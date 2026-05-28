@@ -1,5 +1,5 @@
 [package]
-name = "moat"
+name = "moatd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,7 +14,7 @@ name = "moatd"
 path = "src/bin/moatd.rs"
 
 [dependencies]
-moat-common = { workspace = true, features = ["user"] }
+moatd-common = { workspace = true, features = ["user"] }
 aya = { workspace = true }
 aya-log = { workspace = true }
 anyhow = { workspace = true }
@@ -30,6 +30,7 @@ tracing-journald = { workspace = true }
 sd-notify = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+libc = { workspace = true }
 
 [build-dependencies]
 aya-build = { workspace = true }

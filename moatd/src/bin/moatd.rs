@@ -9,8 +9,8 @@ use aya::{
     programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
     Ebpf,
 };
-use moat_common::control::{Action, Direction, Request, Response, StatusReport, UserRule, SOCKET_PATH};
-use moat_common::{GlobalConfig, Rule, POLICY_IN, POLICY_OUT, RULES_MAX, SCHEMA_VERSION};
+use moatd_common::control::{Action, Direction, Request, Response, StatusReport, UserRule, SOCKET_PATH};
+use moatd_common::{GlobalConfig, Rule, POLICY_IN, POLICY_OUT, RULES_MAX, SCHEMA_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
@@ -18,8 +18,8 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use moat::store::{self, OnDisk, RULES_FILE};
-use moat::wire;
+use moatd::store::{self, OnDisk, RULES_FILE};
+use moatd::wire;
 
 const XDP_PROG: &str = "moat_ingress";
 const TC_PROG: &str = "moat_egress";
@@ -41,7 +41,7 @@ struct DaemonState {
 async fn main() -> Result<()> {
     init_tracing();
 
-    let ebpf_bytes = include_bytes_aligned!(concat!(env!("OUT_DIR"), "/moat"));
+    let ebpf_bytes = include_bytes_aligned!(concat!(env!("OUT_DIR"), "/moatd-bpf"));
     let mut ebpf = Ebpf::load(ebpf_bytes).context("loading eBPF object")?;
 
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
@@ -162,6 +162,17 @@ fn init_tracing() {
 }
 
 fn enumerate_interfaces() -> Result<Vec<String>> {
+    if let Ok(val) = std::env::var("MOAT_INTERFACES") {
+        let ifs: Vec<String> = val
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if ifs.is_empty() {
+            anyhow::bail!("MOAT_INTERFACES is set but empty");
+        }
+        return Ok(ifs);
+    }
     let mut out = Vec::new();
     for entry in std::fs::read_dir("/sys/class/net").context("reading /sys/class/net")? {
         let name = entry?.file_name().to_string_lossy().into_owned();
@@ -240,19 +251,22 @@ fn sync_config(state: &mut DaemonState) -> Result<()> {
 }
 
 fn sync_rules(state: &mut DaemonState) -> Result<()> {
-    let priorities: Vec<Rule> = state
-        .on_disk
-        .rules
-        .iter()
-        .enumerate()
-        .map(|(i, ur)| {
-            let iface_ifindex = wire::resolve_iface(ur.iface.as_deref());
-            wire::build_wire_rule(ur, i as u32, iface_ifindex)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut wire_rules: Vec<Rule> = Vec::with_capacity(state.on_disk.rules.len());
+    for ur in &state.on_disk.rules {
+        let iface_ifindex = wire::resolve_iface(ur.iface.as_deref());
+        if let Some(name) = ur.iface.as_deref() {
+            if iface_ifindex == moatd_common::IFACE_ABSENT {
+                warn!(
+                    iface = name,
+                    "interface not present; rule disabled until it appears"
+                );
+            }
+        }
+        wire_rules.push(wire::build_wire_rule(ur, iface_ifindex)?);
+    }
 
     for i in 0..RULES_MAX {
-        let slot = priorities
+        let slot = wire_rules
             .get(i as usize)
             .copied()
             .unwrap_or_else(wire::empty_wire_rule);
@@ -266,21 +280,45 @@ fn bind_control_socket() -> Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750));
     }
     if path.exists() {
-        std::fs::remove_file(path).context("removing stale socket")?;
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => anyhow::bail!(
+                "another moatd is already running and bound to {}",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::fs::remove_file(path).context("removing stale socket")?;
+            }
+            Err(e) => return Err(anyhow::anyhow!("probing existing socket: {e}")),
+        }
     }
-    let listener = UnixListener::bind(path)?;
+    // Restrict mode at creation time, not after, so there's no world-accessible window.
+    let prev = unsafe { libc::umask(0o117) };
+    let listener_result = UnixListener::bind(path);
+    unsafe { libc::umask(prev) };
+    let listener = listener_result?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
     Ok(listener)
 }
 
 async fn serve_client(mut stream: UnixStream, shared: Arc<Mutex<DaemonState>>) -> Result<()> {
-    let req = read_frame(&mut stream).await?;
+    let req = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_frame(&mut stream),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("client read timed out"))??;
     let req: Request = serde_json::from_slice(&req).context("decoding request")?;
     let resp = dispatch(req, &shared).await;
     let resp_bytes = serde_json::to_vec(&resp)?;
-    write_frame(&mut stream, &resp_bytes).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        write_frame(&mut stream, &resp_bytes),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("client write timed out"))??;
     Ok(())
 }
 
@@ -319,8 +357,21 @@ fn add_rule(state: &mut DaemonState, rule: UserRule) -> Result<()> {
     if state.on_disk.rules.len() >= RULES_MAX as usize {
         anyhow::bail!("rule limit ({RULES_MAX}) reached");
     }
+    if let Some(name) = rule.iface.as_deref() {
+        validate_iface_name(name)?;
+    }
     state.on_disk.rules.push(rule);
     persist_and_sync(state)
+}
+
+fn validate_iface_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 15 {
+        anyhow::bail!("invalid interface name `{name}`");
+    }
+    if name.bytes().any(|b| b == b'/' || b == b' ' || b == 0) {
+        anyhow::bail!("invalid interface name `{name}`");
+    }
+    Ok(())
 }
 
 fn delete_rule(state: &mut DaemonState, one_based_idx: u32) -> Result<()> {
@@ -352,6 +403,7 @@ fn reset(state: &mut DaemonState) -> Result<()> {
     state.on_disk.rules.clear();
     state.on_disk.default_in = Action::Allow;
     state.on_disk.default_out = Action::Allow;
+    state.on_disk.logging_enabled = false;
     persist_and_sync(state)
 }
 

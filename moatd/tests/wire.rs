@@ -1,5 +1,5 @@
-use moat_common::control::{Action, Direction, Protocol, UserRule};
-use moat_common::{FAMILY_V4, FAMILY_V6, IFACE_ANY, PROTO_TCP};
+use moatd_common::control::{Action, Direction, Protocol, UserRule};
+use moatd_common::{FAMILY_V4, FAMILY_V6, IFACE_ANY, PROTO_TCP};
 
 #[test]
 fn cidr_v4_with_prefix() {
@@ -13,7 +13,7 @@ fn cidr_v4_with_prefix() {
         src_port: None,
         dst_port: Some("22".into()),
     };
-    let wire = moat::wire::build_wire_rule(&r, 0, IFACE_ANY).unwrap();
+    let wire = moatd::wire::build_wire_rule(&r, IFACE_ANY).unwrap();
     assert_eq!(wire.src.family, FAMILY_V4);
     assert_eq!(wire.src.prefix, 8);
     assert_eq!(&wire.src.addr[..4], &[10, 0, 0, 0]);
@@ -34,7 +34,7 @@ fn cidr_v4_host_default_prefix() {
         src_port: None,
         dst_port: None,
     };
-    let wire = moat::wire::build_wire_rule(&r, 0, IFACE_ANY).unwrap();
+    let wire = moatd::wire::build_wire_rule(&r, IFACE_ANY).unwrap();
     assert_eq!(wire.src.prefix, 32);
     assert_eq!(&wire.src.addr[..4], &[1, 2, 3, 4]);
 }
@@ -51,7 +51,7 @@ fn port_range() {
         src_port: None,
         dst_port: Some("1000-2000".into()),
     };
-    let wire = moat::wire::build_wire_rule(&r, 0, IFACE_ANY).unwrap();
+    let wire = moatd::wire::build_wire_rule(&r, IFACE_ANY).unwrap();
     assert_eq!(wire.dst_port_min, 1000);
     assert_eq!(wire.dst_port_max, 2000);
 }
@@ -68,7 +68,7 @@ fn invalid_cidr_rejected() {
         src_port: None,
         dst_port: None,
     };
-    assert!(moat::wire::build_wire_rule(&r, 0, IFACE_ANY).is_err());
+    assert!(moatd::wire::build_wire_rule(&r, IFACE_ANY).is_err());
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn cidr_v6_with_prefix() {
         src_port: None,
         dst_port: Some("22".into()),
     };
-    let wire = moat::wire::build_wire_rule(&r, 0, IFACE_ANY).unwrap();
+    let wire = moatd::wire::build_wire_rule(&r, IFACE_ANY).unwrap();
     assert_eq!(wire.src.family, FAMILY_V6);
     assert_eq!(wire.src.prefix, 10);
     assert_eq!(wire.src.addr[0], 0xfe);
@@ -104,7 +104,7 @@ fn cidr_v6_host_default_prefix() {
         src_port: None,
         dst_port: None,
     };
-    let wire = moat::wire::build_wire_rule(&r, 0, IFACE_ANY).unwrap();
+    let wire = moatd::wire::build_wire_rule(&r, IFACE_ANY).unwrap();
     assert_eq!(wire.src.family, FAMILY_V6);
     assert_eq!(wire.src.prefix, 128);
     assert_eq!(wire.src.addr[0], 0x20);
@@ -124,5 +124,5 @@ fn mixed_v4_v6_rejected() {
         src_port: None,
         dst_port: None,
     };
-    assert!(moat::wire::build_wire_rule(&r, 0, IFACE_ANY).is_err());
+    assert!(moatd::wire::build_wire_rule(&r, IFACE_ANY).is_err());
 }

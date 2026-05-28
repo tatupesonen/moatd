@@ -1,5 +1,5 @@
 [package]
-name = "moat-common"
+name = "moatd-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,3 +12,4 @@ user = ["dep:aya", "dep:serde"]
 [dependencies]
 aya = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+bytemuck = { workspace = true }

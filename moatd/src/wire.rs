@@ -2,17 +2,16 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Result};
-use moat_common::control::{Action, Direction, Protocol, UserRule};
-use moat_common::{
+use moatd_common::control::{Action, Direction, Protocol, UserRule};
+use moatd_common::{
     ACT_ALLOW, ACT_DENY, ACT_REJECT, DIR_IN, DIR_OUT, FAMILY_V4, FAMILY_V6, IFACE_ABSENT,
     IFACE_ANY, PROTO_ANY, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, SCHEMA_VERSION,
 };
 
 pub fn build_wire_rule(
     user: &UserRule,
-    priority: u32,
     iface_ifindex: u32,
-) -> Result<moat_common::Rule> {
+) -> Result<moatd_common::Rule> {
     let parsed_src = user.src.as_deref().map(parse_cidr).transpose()?;
     let parsed_dst = user.dst.as_deref().map(parse_cidr).transpose()?;
 
@@ -37,7 +36,7 @@ pub fn build_wire_rule(
         None => (0, 0),
     };
 
-    Ok(moat_common::Rule {
+    Ok(moatd_common::Rule {
         version: SCHEMA_VERSION,
         direction: direction_byte(user.direction),
         action: action_byte(user.action),
@@ -49,14 +48,13 @@ pub fn build_wire_rule(
         src_port_max,
         dst_port_min,
         dst_port_max,
-        priority,
         enabled: 1,
         _pad: [0; 3],
     })
 }
 
-pub fn empty_wire_rule() -> moat_common::Rule {
-    moat_common::Rule::empty()
+pub fn empty_wire_rule() -> moatd_common::Rule {
+    moatd_common::Rule::empty()
 }
 
 pub fn direction_byte(d: Direction) -> u8 {
@@ -92,11 +90,11 @@ fn icmp_proto_for_family(family: u8) -> u8 {
     }
 }
 
-fn any_cidr(family: u8) -> moat_common::IpCidr {
+fn any_cidr(family: u8) -> moatd_common::IpCidr {
     if family == FAMILY_V6 {
-        moat_common::IpCidr::any_v6()
+        moatd_common::IpCidr::any_v6()
     } else {
-        moat_common::IpCidr::any_v4()
+        moatd_common::IpCidr::any_v4()
     }
 }
 
@@ -108,7 +106,7 @@ pub fn resolve_iface(name: Option<&str>) -> u32 {
     }
 }
 
-pub fn parse_cidr(s: &str) -> Result<moat_common::IpCidr> {
+pub fn parse_cidr(s: &str) -> Result<moatd_common::IpCidr> {
     let (addr_s, prefix_s) = match s.rsplit_once('/') {
         Some((a, p)) => (a, Some(p)),
         None => (s, None),
@@ -123,7 +121,7 @@ pub fn parse_cidr(s: &str) -> Result<moat_common::IpCidr> {
         }
         let mut bytes = [0u8; 16];
         bytes[..4].copy_from_slice(&addr.octets());
-        return Ok(moat_common::IpCidr {
+        return Ok(moatd_common::IpCidr {
             family: FAMILY_V4,
             prefix,
             _pad: [0; 2],
@@ -138,7 +136,7 @@ pub fn parse_cidr(s: &str) -> Result<moat_common::IpCidr> {
         if prefix > 128 {
             bail!("CIDR prefix `{prefix}` out of range for IPv6");
         }
-        return Ok(moat_common::IpCidr {
+        return Ok(moatd_common::IpCidr {
             family: FAMILY_V6,
             prefix,
             _pad: [0; 2],

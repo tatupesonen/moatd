@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["moat-common", "moat", "moat-ebpf"]
-default-members = ["moat-common", "moat"]
+members = ["moatd-common", "moatd", "moatd-ebpf"]
+default-members = ["moatd-common", "moatd"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.80"
 
 [workspace.dependencies]
-moat-common = { path = "moat-common" }
+moatd-common = { path = "moatd-common" }
 aya = "0.13"
 aya-log = "0.2"
 aya-build = "0.1"
@@ -33,12 +33,14 @@ log = "0.4"
 env_logger = "0.11"
 cargo_metadata = "0.23"
 which = { version = "8", default-features = false, features = ["real-sys"] }
+bytemuck = { version = "1.18", default-features = false, features = ["derive"] }
+libc = "0.2"
 
 [profile.release]
 lto = true
 codegen-units = 1
 strip = "debuginfo"
 
-[profile.release.package.moat-ebpf]
+[profile.release.package.moatd-ebpf]
 debug = 2
 codegen-units = 1

@@ -1,13 +1,14 @@
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use moat_common::control::{Action, UserRule};
+use moatd_common::control::{Action, UserRule};
 use serde::{Deserialize, Serialize};
 
-pub const CONFIG_DIR: &str = "/etc/moat";
-pub const RULES_FILE: &str = "/etc/moat/rules.toml";
+pub const CONFIG_DIR: &str = "/etc/moatd";
+pub const RULES_FILE: &str = "/etc/moatd/rules.toml";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OnDisk {
@@ -60,11 +61,17 @@ pub fn save(path: impl AsRef<Path>, on_disk: &OnDisk) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o750));
     }
     let body = toml::to_string_pretty(on_disk)?;
     let tmp = tmp_path(path);
+    let _ = fs::remove_file(&tmp);
     {
-        let mut f = fs::File::create(&tmp)
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o640)
+            .open(&tmp)
             .with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(body.as_bytes())?;
         f.sync_all().ok();

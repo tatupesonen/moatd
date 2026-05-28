@@ -1,12 +1,12 @@
 [package]
-name = "moat-ebpf"
+name = "moatd-ebpf"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-moat-common = { path = "../moat-common", default-features = false }
+moatd-common = { path = "../moatd-common", default-features = false }
 aya-ebpf = "0.1"
 aya-log-ebpf = "0.1"
 network-types = "0.0.7"
@@ -15,5 +15,5 @@ network-types = "0.0.7"
 which = { version = "8", default-features = false, features = ["real-sys"] }
 
 [[bin]]
-name = "moat"
+name = "moatd-bpf"
 path = "src/main.rs"

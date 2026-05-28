@@ -31,7 +31,7 @@ pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
 pub const CONNTRACK_TTL_NS: u64 = 60_000_000_000;
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct IpCidr {
     pub family: u8,
     pub prefix: u8,
@@ -50,7 +50,7 @@ impl IpCidr {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Rule {
     pub version: u8,
     pub direction: u8,
@@ -63,7 +63,6 @@ pub struct Rule {
     pub src_port_max: u16,
     pub dst_port_min: u16,
     pub dst_port_max: u16,
-    pub priority: u32,
     pub enabled: u8,
     pub _pad: [u8; 3],
 }
@@ -82,7 +81,6 @@ impl Rule {
             src_port_max: 0,
             dst_port_min: 0,
             dst_port_max: 0,
-            priority: 0,
             enabled: 0,
             _pad: [0; 3],
         }
@@ -90,7 +88,7 @@ impl Rule {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DropEvent {
     pub ts_ns: u64,
     pub ifindex: u32,
@@ -106,7 +104,7 @@ pub struct DropEvent {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlobalConfig {
     pub logging_enabled: u8,
     pub log_level: u8,
@@ -114,7 +112,7 @@ pub struct GlobalConfig {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ConnKey {
     pub proto: u8,
     pub family: u8,
@@ -126,7 +124,7 @@ pub struct ConnKey {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ConnVal {
     pub last_seen_ns: u64,
 }

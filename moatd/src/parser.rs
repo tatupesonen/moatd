@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use moat_common::control::{Action, Direction, Protocol, UserRule};
+use moatd_common::control::{Action, Direction, Protocol, UserRule};
 
 pub fn parse_rule_spec(action: Action, tokens: &[String]) -> Result<UserRule> {
     if tokens.is_empty() {

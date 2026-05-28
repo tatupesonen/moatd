@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  EBPF_TOOLCHAIN: nightly-2025-04-01
+
+jobs:
+  unit:
+    name: Build + unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust nightly (for eBPF)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.EBPF_TOOLCHAIN }}
+          components: rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install bpf-linker
+        run: |
+          if ! command -v bpf-linker >/dev/null 2>&1; then
+            cargo install bpf-linker --locked
+          fi
+
+      - name: Build
+        run: cargo build --workspace --exclude moatd-ebpf
+
+      - name: Unit tests
+        run: cargo test -p moatd -p moatd-common
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-24.04
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust nightly (for eBPF)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.EBPF_TOOLCHAIN }}
+          components: rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install bpf-linker
+        run: |
+          if ! command -v bpf-linker >/dev/null 2>&1; then
+            cargo install bpf-linker --locked
+          fi
+
+      - name: Install runtime tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            iproute2 netcat-openbsd iputils-ping linux-tools-common bpftool
+
+      - name: Build
+        run: cargo build
+
+      - name: Kernel info
+        run: |
+          uname -a
+          ip -V
+          bpftool --version | head -1
+
+      - name: Integration tests
+        run: sudo --preserve-env=PATH bash tests/integration/run.sh
