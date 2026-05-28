@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="moatd.png" alt="moatd" width="380">
+  <img src="moatd.png" alt="moatd" width="100%">
 </p>
 
 <p align="center">
