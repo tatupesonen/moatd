@@ -1,0 +1,3 @@
+name = "dns"
+ports = "53"
+proto = "udp"

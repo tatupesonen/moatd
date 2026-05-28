@@ -29,6 +29,7 @@ install:
 	ln -sf $(SBIN)/moatd $(DESTDIR)$(BIN)/moatd
 	install -m 0644 dist/moatd.service   $(DESTDIR)$(UNIT)/moatd.service
 	install -m 0644 dist/modules-load.d/moatd.conf $(DESTDIR)$(MOD)/moatd.conf
+	install -m 0644 dist/applications.d/*.toml $(DESTDIR)$(ETC)/applications.d/
 	@echo
 	@echo "moatd installed. Run:"
 	@echo "  sudo systemctl daemon-reload"

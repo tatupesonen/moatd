@@ -181,8 +181,23 @@ fn list() -> Result<()> {
 }
 
 fn add(action: Action, spec: &[String]) -> Result<()> {
-    let rule = parser::parse_rule_spec(action, spec)?;
-    simple_ok(call(&Request::AddRule(rule))?, "rule added")
+    let rules = parser::parse_rule_spec(action, spec)?;
+    if rules.is_empty() {
+        anyhow::bail!("no rules produced from spec");
+    }
+    for rule in &rules {
+        match call(&Request::AddRule(rule.clone()))? {
+            Response::Ok => {}
+            Response::Err(e) => anyhow::bail!("daemon error: {e}"),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        }
+    }
+    if rules.len() == 1 {
+        println!("rule added");
+    } else {
+        println!("{} rules added (app profile)", rules.len());
+    }
+    Ok(())
 }
 
 fn ping() -> Result<()> {
@@ -285,40 +300,40 @@ async fn run_daemon() -> Result<()> {
         warn!(error = %e, "eBPF logger init failed");
     }
 
-    let interfaces = enumerate_interfaces()?;
-
+    // Load both programs into the kernel once. Per-interface attach happens
+    // below (initially) and from the link watcher (for interfaces that appear
+    // later).
     {
         let prog: &mut Xdp = ebpf
             .program_mut(XDP_PROG)
             .with_context(|| format!("program {XDP_PROG} not found"))?
             .try_into()?;
         prog.load().context("loading XDP program into kernel")?;
-        for iface in &interfaces {
-            match attach_xdp_with_fallback(prog, iface) {
-                Ok(mode) => info!(iface, mode, "XDP attached"),
-                Err(e) => warn!(iface, error = %e, "XDP attach failed"),
-            }
-        }
     }
-
-    let mut attached = Vec::new();
     {
         let tc_prog: &mut SchedClassifier = ebpf
             .program_mut(TC_PROG)
             .with_context(|| format!("program {TC_PROG} not found"))?
             .try_into()?;
         tc_prog.load().context("loading TC program into kernel")?;
-        for iface in &interfaces {
-            let _ = tc::qdisc_add_clsact(iface);
-            match tc_prog.attach(iface, TcAttachType::Egress) {
-                Ok(_) => {
-                    info!(iface, "TC egress attached");
-                    attached.push(iface.clone());
-                }
-                Err(e) => warn!(iface, error = %e, "TC egress attach failed"),
+    }
+
+    let filter = iface_filter();
+    let mut attached_set: HashMap<String, u32> = HashMap::new();
+    let initial_snapshot = wire::iface_snapshot();
+    for (name, (ifindex, _up)) in &initial_snapshot {
+        if !filter(name) {
+            continue;
+        }
+        match attach_to_iface(&mut ebpf, name) {
+            Ok(()) => {
+                info!(iface = name.as_str(), ifindex = *ifindex, "initial attach");
+                attached_set.insert(name.clone(), *ifindex);
             }
+            Err(e) => warn!(iface = name.as_str(), error = %e, "initial attach failed"),
         }
     }
+    let attached: Vec<String> = attached_set.keys().cloned().collect();
 
     let maps = take_maps(&mut ebpf)?;
 
@@ -346,7 +361,7 @@ async fn run_daemon() -> Result<()> {
 
     let shared = Arc::new(Mutex::new(state));
 
-    tokio::spawn(watch_interfaces(Arc::clone(&shared)));
+    tokio::spawn(watch_interfaces(ebpf, Arc::clone(&shared), attached_set, filter));
 
     let listener = bind_control_socket().context("binding control socket")?;
     info!(path = SOCKET_PATH, "control socket listening");
@@ -384,7 +399,35 @@ async fn run_daemon() -> Result<()> {
         }
     }
 
-    let _ = ebpf;
+    Ok(())
+}
+
+fn iface_filter() -> Box<dyn Fn(&str) -> bool + Send + Sync + 'static> {
+    if let Ok(val) = std::env::var("MOAT_INTERFACES") {
+        let allowed: std::collections::HashSet<String> =
+            val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        Box::new(move |name: &str| allowed.contains(name))
+    } else {
+        Box::new(|name: &str| !is_skipped_iface(name))
+    }
+}
+
+fn attach_to_iface(ebpf: &mut Ebpf, iface: &str) -> Result<()> {
+    {
+        let xdp: &mut Xdp = ebpf
+            .program_mut(XDP_PROG)
+            .with_context(|| format!("program {XDP_PROG} not found"))?
+            .try_into()?;
+        attach_xdp_with_fallback(xdp, iface).context("XDP attach")?;
+    }
+    let _ = tc::qdisc_add_clsact(iface);
+    {
+        let tc_prog: &mut SchedClassifier = ebpf
+            .program_mut(TC_PROG)
+            .with_context(|| format!("program {TC_PROG} not found"))?
+            .try_into()?;
+        tc_prog.attach(iface, TcAttachType::Egress).context("TC egress attach")?;
+    }
     Ok(())
 }
 
@@ -406,26 +449,6 @@ fn init_daemon_tracing() {
         }
     }
     tracing_subscriber::registry().with(filter()).with(tracing_subscriber::fmt::layer()).init();
-}
-
-fn enumerate_interfaces() -> Result<Vec<String>> {
-    if let Ok(val) = std::env::var("MOAT_INTERFACES") {
-        let ifs: Vec<String> =
-            val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        if ifs.is_empty() {
-            anyhow::bail!("MOAT_INTERFACES is set but empty");
-        }
-        return Ok(ifs);
-    }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir("/sys/class/net").context("reading /sys/class/net")? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if is_skipped_iface(&name) {
-            continue;
-        }
-        out.push(name);
-    }
-    Ok(out)
 }
 
 fn is_skipped_iface(name: &str) -> bool {
@@ -656,16 +679,47 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
 
 const IFACE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-async fn watch_interfaces(shared: Arc<Mutex<DaemonState>>) {
+async fn watch_interfaces(
+    mut ebpf: Ebpf,
+    shared: Arc<Mutex<DaemonState>>,
+    mut attached: HashMap<String, u32>,
+    filter: Box<dyn Fn(&str) -> bool + Send + Sync + 'static>,
+) {
     let mut tick = tokio::time::interval(IFACE_POLL_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last = wire::iface_snapshot();
     loop {
         tick.tick().await;
         let current = wire::iface_snapshot();
+
+        // Attach to any interface in the allowed set that we haven't attached
+        // to yet (or that came back with a different ifindex).
+        for (name, (ifindex, _up)) in &current {
+            if !filter(name) {
+                continue;
+            }
+            if attached.get(name) == Some(ifindex) {
+                continue;
+            }
+            match attach_to_iface(&mut ebpf, name) {
+                Ok(()) => {
+                    info!(iface = name.as_str(), ifindex = *ifindex, "dynamic attach");
+                    attached.insert(name.clone(), *ifindex);
+                    let mut s = shared.lock().await;
+                    if !s.attached_interfaces.contains(name) {
+                        s.attached_interfaces.push(name.clone());
+                    }
+                }
+                Err(e) => {
+                    warn!(iface = name.as_str(), error = %e, "dynamic attach failed");
+                }
+            }
+        }
+
         if current == last {
             continue;
         }
+
         let changed: Vec<String> = current
             .iter()
             .filter(|(k, v)| last.get(*k) != Some(*v))

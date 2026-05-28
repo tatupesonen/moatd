@@ -1,0 +1,3 @@
+name = "mosh"
+ports = "60000-61000"
+proto = "udp"

@@ -1,0 +1,3 @@
+name = "ntp"
+ports = "123"
+proto = "udp"
