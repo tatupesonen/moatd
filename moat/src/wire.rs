@@ -1,11 +1,11 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Result};
 use moat_common::control::{Action, Direction, Protocol, UserRule};
 use moat_common::{
-    ACT_ALLOW, ACT_DENY, ACT_REJECT, DIR_IN, DIR_OUT, FAMILY_V4, IFACE_ABSENT, IFACE_ANY,
-    PROTO_ANY, PROTO_ICMP, PROTO_TCP, PROTO_UDP, SCHEMA_VERSION,
+    ACT_ALLOW, ACT_DENY, ACT_REJECT, DIR_IN, DIR_OUT, FAMILY_V4, FAMILY_V6, IFACE_ABSENT,
+    IFACE_ANY, PROTO_ANY, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, SCHEMA_VERSION,
 };
 
 pub fn build_wire_rule(
@@ -13,14 +13,20 @@ pub fn build_wire_rule(
     priority: u32,
     iface_ifindex: u32,
 ) -> Result<moat_common::Rule> {
-    let src = match &user.src {
-        Some(s) => parse_cidr_v4(s)?,
-        None => moat_common::IpCidr::any_v4(),
+    let parsed_src = user.src.as_deref().map(parse_cidr).transpose()?;
+    let parsed_dst = user.dst.as_deref().map(parse_cidr).transpose()?;
+
+    let family = match (parsed_src, parsed_dst) {
+        (Some(a), Some(b)) if a.family != b.family => {
+            bail!("src and dst address families mismatch")
+        }
+        (Some(a), _) => a.family,
+        (_, Some(b)) => b.family,
+        (None, None) => FAMILY_V4,
     };
-    let dst = match &user.dst {
-        Some(s) => parse_cidr_v4(s)?,
-        None => moat_common::IpCidr::any_v4(),
-    };
+
+    let src = parsed_src.unwrap_or(any_cidr(family));
+    let dst = parsed_dst.unwrap_or(any_cidr(family));
 
     let (src_port_min, src_port_max) = match &user.src_port {
         Some(p) => parse_port_range(p)?,
@@ -77,6 +83,23 @@ pub fn proto_byte(p: Option<Protocol>) -> u8 {
     }
 }
 
+#[allow(dead_code)]
+fn icmp_proto_for_family(family: u8) -> u8 {
+    if family == FAMILY_V6 {
+        PROTO_ICMPV6
+    } else {
+        PROTO_ICMP
+    }
+}
+
+fn any_cidr(family: u8) -> moat_common::IpCidr {
+    if family == FAMILY_V6 {
+        moat_common::IpCidr::any_v6()
+    } else {
+        moat_common::IpCidr::any_v4()
+    }
+}
+
 pub fn resolve_iface(name: Option<&str>) -> u32 {
     let Some(name) = name else { return IFACE_ANY };
     match std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex")) {
@@ -85,24 +108,44 @@ pub fn resolve_iface(name: Option<&str>) -> u32 {
     }
 }
 
-fn parse_cidr_v4(s: &str) -> Result<moat_common::IpCidr> {
-    let (addr_s, prefix) = match s.split_once('/') {
-        Some((a, p)) => (a, p.parse::<u8>().context("invalid CIDR prefix")?),
-        None => (s, 32),
+pub fn parse_cidr(s: &str) -> Result<moat_common::IpCidr> {
+    let (addr_s, prefix_s) = match s.rsplit_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (s, None),
     };
-    let addr = Ipv4Addr::from_str(addr_s).map_err(|_| anyhow!("invalid IPv4 address `{addr_s}`"))?;
-    if prefix > 32 {
-        bail!("CIDR prefix `{prefix}` out of range for IPv4");
+    if let Ok(addr) = Ipv4Addr::from_str(addr_s) {
+        let prefix = match prefix_s {
+            Some(p) => p.parse::<u8>().context("invalid CIDR prefix")?,
+            None => 32,
+        };
+        if prefix > 32 {
+            bail!("CIDR prefix `{prefix}` out of range for IPv4");
+        }
+        let mut bytes = [0u8; 16];
+        bytes[..4].copy_from_slice(&addr.octets());
+        return Ok(moat_common::IpCidr {
+            family: FAMILY_V4,
+            prefix,
+            _pad: [0; 2],
+            addr: bytes,
+        });
     }
-    let octets = addr.octets();
-    let mut bytes = [0u8; 16];
-    bytes[..4].copy_from_slice(&octets);
-    Ok(moat_common::IpCidr {
-        family: FAMILY_V4,
-        prefix,
-        _pad: [0; 2],
-        addr: bytes,
-    })
+    if let Ok(addr) = Ipv6Addr::from_str(addr_s) {
+        let prefix = match prefix_s {
+            Some(p) => p.parse::<u8>().context("invalid CIDR prefix")?,
+            None => 128,
+        };
+        if prefix > 128 {
+            bail!("CIDR prefix `{prefix}` out of range for IPv6");
+        }
+        return Ok(moat_common::IpCidr {
+            family: FAMILY_V6,
+            prefix,
+            _pad: [0; 2],
+            addr: addr.octets(),
+        });
+    }
+    Err(anyhow!("invalid IP address `{addr_s}`"))
 }
 
 fn parse_port_range(s: &str) -> Result<(u16, u16)> {

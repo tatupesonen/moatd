@@ -12,12 +12,12 @@ use aya_ebpf::{
 };
 use moat_common::{
     ConnKey, ConnVal, GlobalConfig, IpCidr, Rule, ACT_ALLOW, CONNTRACK_MAX_ENTRIES,
-    CONNTRACK_TTL_NS, DIR_IN, DIR_OUT, FAMILY_V4, IFACE_ANY, POLICY_IN, POLICY_OUT,
-    PROTO_ANY, PROTO_ICMP, PROTO_TCP, PROTO_UDP, RULES_MAX,
+    CONNTRACK_TTL_NS, DIR_IN, DIR_OUT, FAMILY_V4, FAMILY_V6, IFACE_ANY, POLICY_IN, POLICY_OUT,
+    PROTO_ANY, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, RULES_MAX,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
-    ip::{IpProto, Ipv4Hdr},
+    ip::{IpProto, Ipv4Hdr, Ipv6Hdr},
     tcp::TcpHdr,
     udp::UdpHdr,
 };
@@ -37,12 +37,20 @@ static CONNTRACK: LruHashMap<ConnKey, ConnVal> =
 
 #[derive(Copy, Clone)]
 struct Parsed {
-    src_addr_be: u32,
-    dst_addr_be: u32,
+    family: u8,
+    proto_byte: u8,
+    icmp_type: u8,
+    src_addr: [u8; 16],
+    dst_addr: [u8; 16],
     src_port: u16,
     dst_port: u16,
-    proto_byte: u8,
 }
+
+const ICMPV6_RS: u8 = 133;
+const ICMPV6_RA: u8 = 134;
+const ICMPV6_NS: u8 = 135;
+const ICMPV6_NA: u8 = 136;
+const ICMPV6_REDIRECT: u8 = 137;
 
 #[xdp]
 pub fn moat_ingress(ctx: XdpContext) -> u32 {
@@ -73,35 +81,37 @@ fn try_ingress(ctx: &XdpContext) -> Result<u32, ()> {
     let data = ctx.data();
     let data_end = ctx.data_end();
 
-    let Some(parsed) = parse_v4(data, data_end)? else {
+    let Some(parsed) = parse_packet(data, data_end)? else {
         return Ok(xdp_action::XDP_PASS);
     };
 
-    // Conntrack: reverse lookup against the egress-stored forward key.
+    if is_ndp(&parsed) {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
     let now = unsafe { bpf_ktime_get_ns() };
     let reverse_key = ConnKey {
         proto: parsed.proto_byte,
-        _pad: [0; 3],
-        src_addr_be: parsed.dst_addr_be,
-        dst_addr_be: parsed.src_addr_be,
+        family: parsed.family,
+        _pad: [0; 2],
+        src_addr: parsed.dst_addr,
+        dst_addr: parsed.src_addr,
         src_port: parsed.dst_port,
         dst_port: parsed.src_port,
     };
     if let Some(v) = unsafe { CONNTRACK.get(&reverse_key) } {
-        let last = v.last_seen_ns;
-        if now.saturating_sub(last) < CONNTRACK_TTL_NS {
+        if now.saturating_sub(v.last_seen_ns) < CONNTRACK_TTL_NS {
             let _ = CONNTRACK.insert(&reverse_key, &ConnVal { last_seen_ns: now }, 0);
             return Ok(xdp_action::XDP_PASS);
         }
     }
 
     let chosen = walk_rules(DIR_IN, ifindex, &parsed);
-    let action = if chosen == ACT_ALLOW {
+    Ok(if chosen == ACT_ALLOW {
         xdp_action::XDP_PASS
     } else {
         xdp_action::XDP_DROP
-    };
-    Ok(action)
+    })
 }
 
 fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
@@ -109,9 +119,13 @@ fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
     let data = ctx.data();
     let data_end = ctx.data_end();
 
-    let Some(parsed) = parse_v4(data, data_end)? else {
+    let Some(parsed) = parse_packet(data, data_end)? else {
         return Ok(TC_ACT_PIPE);
     };
+
+    if is_ndp(&parsed) {
+        return Ok(TC_ACT_PIPE);
+    }
 
     let chosen = walk_rules(DIR_OUT, ifindex, &parsed);
     if chosen != ACT_ALLOW {
@@ -120,9 +134,10 @@ fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
 
     let forward_key = ConnKey {
         proto: parsed.proto_byte,
-        _pad: [0; 3],
-        src_addr_be: parsed.src_addr_be,
-        dst_addr_be: parsed.dst_addr_be,
+        family: parsed.family,
+        _pad: [0; 2],
+        src_addr: parsed.src_addr,
+        dst_addr: parsed.dst_addr,
         src_port: parsed.src_port,
         dst_port: parsed.dst_port,
     };
@@ -132,15 +147,30 @@ fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
 }
 
 #[inline(always)]
-fn parse_v4(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
-    let eth: *const EthHdr = unsafe { ptr_at_data(data, data_end, 0)? };
-    if unsafe { (*eth).ether_type } != EtherType::Ipv4 {
-        return Ok(None);
-    }
+fn is_ndp(p: &Parsed) -> bool {
+    p.family == FAMILY_V6
+        && p.proto_byte == PROTO_ICMPV6
+        && matches!(
+            p.icmp_type,
+            ICMPV6_RS | ICMPV6_RA | ICMPV6_NS | ICMPV6_NA | ICMPV6_REDIRECT
+        )
+}
 
+#[inline(always)]
+fn parse_packet(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
+    let eth: *const EthHdr = unsafe { ptr_at_data(data, data_end, 0)? };
+    match unsafe { (*eth).ether_type } {
+        EtherType::Ipv4 => parse_v4(data, data_end),
+        EtherType::Ipv6 => parse_v6(data, data_end),
+        _ => Ok(None),
+    }
+}
+
+#[inline(always)]
+fn parse_v4(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
     let ipv4: *const Ipv4Hdr = unsafe { ptr_at_data(data, data_end, EthHdr::LEN)? };
-    let src_addr_be = unsafe { (*ipv4).src_addr };
-    let dst_addr_be = unsafe { (*ipv4).dst_addr };
+    let src_be = unsafe { (*ipv4).src_addr };
+    let dst_be = unsafe { (*ipv4).dst_addr };
     let ip_proto = unsafe { (*ipv4).proto };
     let ihl = unsafe { (*ipv4).ihl() } as usize;
     if ihl < 5 {
@@ -148,13 +178,63 @@ fn parse_v4(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
     }
     let l4_off = EthHdr::LEN + ihl * 4;
 
-    let (src_port, dst_port, proto_byte) = match ip_proto {
+    let (src_port, dst_port, proto_byte, icmp_type) =
+        parse_l4(data, data_end, l4_off, ip_proto, false)?;
+
+    let mut src_addr = [0u8; 16];
+    let mut dst_addr = [0u8; 16];
+    src_addr[..4].copy_from_slice(&src_be.to_ne_bytes());
+    dst_addr[..4].copy_from_slice(&dst_be.to_ne_bytes());
+
+    Ok(Some(Parsed {
+        family: FAMILY_V4,
+        proto_byte,
+        icmp_type,
+        src_addr,
+        dst_addr,
+        src_port,
+        dst_port,
+    }))
+}
+
+#[inline(always)]
+fn parse_v6(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
+    let ipv6: *const Ipv6Hdr = unsafe { ptr_at_data(data, data_end, EthHdr::LEN)? };
+    let next_hdr = unsafe { (*ipv6).next_hdr };
+    let src_addr: [u8; 16] = unsafe { (*ipv6).src_addr.in6_u.u6_addr8 };
+    let dst_addr: [u8; 16] = unsafe { (*ipv6).dst_addr.in6_u.u6_addr8 };
+    let l4_off = EthHdr::LEN + Ipv6Hdr::LEN;
+
+    let (src_port, dst_port, proto_byte, icmp_type) =
+        parse_l4(data, data_end, l4_off, next_hdr, true)?;
+
+    Ok(Some(Parsed {
+        family: FAMILY_V6,
+        proto_byte,
+        icmp_type,
+        src_addr,
+        dst_addr,
+        src_port,
+        dst_port,
+    }))
+}
+
+#[inline(always)]
+fn parse_l4(
+    data: usize,
+    data_end: usize,
+    l4_off: usize,
+    proto: IpProto,
+    is_v6: bool,
+) -> Result<(u16, u16, u8, u8), ()> {
+    Ok(match proto {
         IpProto::Tcp => {
             let tcp: *const TcpHdr = unsafe { ptr_at_data(data, data_end, l4_off)? };
             (
                 u16::from_be(unsafe { (*tcp).source }),
                 u16::from_be(unsafe { (*tcp).dest }),
                 PROTO_TCP,
+                0,
             )
         }
         IpProto::Udp => {
@@ -163,26 +243,32 @@ fn parse_v4(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
                 u16::from_be(unsafe { (*udp).source }),
                 u16::from_be(unsafe { (*udp).dest }),
                 PROTO_UDP,
+                0,
             )
         }
-        IpProto::Icmp => (0u16, 0u16, PROTO_ICMP),
-        _ => (0u16, 0u16, PROTO_ANY),
-    };
-
-    Ok(Some(Parsed {
-        src_addr_be,
-        dst_addr_be,
-        src_port,
-        dst_port,
-        proto_byte,
-    }))
+        IpProto::Icmp if !is_v6 => (0, 0, PROTO_ICMP, 0),
+        IpProto::Ipv6Icmp if is_v6 => {
+            let ty_ptr: *const u8 = unsafe { ptr_at_data(data, data_end, l4_off)? };
+            (0, 0, PROTO_ICMPV6, unsafe { *ty_ptr })
+        }
+        _ => (0, 0, PROTO_ANY, 0),
+    })
 }
 
 #[inline(always)]
-fn cidr_contains_v4(cidr: &IpCidr, addr_be: u32) -> bool {
-    if cidr.family != FAMILY_V4 {
+fn cidr_contains(cidr: &IpCidr, addr: &[u8; 16], family: u8) -> bool {
+    if cidr.family != family {
         return false;
     }
+    if family == FAMILY_V4 {
+        cidr_contains_v4(cidr, addr)
+    } else {
+        cidr_contains_v6(cidr, addr)
+    }
+}
+
+#[inline(always)]
+fn cidr_contains_v4(cidr: &IpCidr, addr: &[u8; 16]) -> bool {
     let prefix = cidr.prefix as u32;
     if prefix == 0 {
         return true;
@@ -190,19 +276,42 @@ fn cidr_contains_v4(cidr: &IpCidr, addr_be: u32) -> bool {
     if prefix > 32 {
         return false;
     }
-    let cidr_addr = u32::from_be_bytes([
-        cidr.addr[0],
-        cidr.addr[1],
-        cidr.addr[2],
-        cidr.addr[3],
-    ]);
-    let addr = u32::from_be(addr_be);
+    let cidr_word = u32::from_be_bytes([cidr.addr[0], cidr.addr[1], cidr.addr[2], cidr.addr[3]]);
+    let addr_word = u32::from_be_bytes([addr[0], addr[1], addr[2], addr[3]]);
     let mask: u32 = if prefix >= 32 {
         u32::MAX
     } else {
         u32::MAX << (32 - prefix)
     };
-    (cidr_addr & mask) == (addr & mask)
+    (cidr_word & mask) == (addr_word & mask)
+}
+
+#[inline(always)]
+fn cidr_contains_v6(cidr: &IpCidr, addr: &[u8; 16]) -> bool {
+    let mut prefix = cidr.prefix as usize;
+    if prefix == 0 {
+        return true;
+    }
+    if prefix > 128 {
+        return false;
+    }
+    let mut i = 0;
+    while i < 16 {
+        if prefix == 0 {
+            return true;
+        }
+        if prefix >= 8 {
+            if cidr.addr[i] != addr[i] {
+                return false;
+            }
+            prefix -= 8;
+        } else {
+            let mask = !((1u8 << (8 - prefix)) - 1);
+            return (cidr.addr[i] & mask) == (addr[i] & mask);
+        }
+        i += 1;
+    }
+    true
 }
 
 #[inline(always)]
@@ -225,10 +334,10 @@ fn walk_rules(direction: u8, ifindex: u32, p: &Parsed) -> u8 {
         if rule.proto != PROTO_ANY && rule.proto != p.proto_byte {
             continue;
         }
-        if !cidr_contains_v4(&rule.src, p.src_addr_be) {
+        if !cidr_contains(&rule.src, &p.src_addr, p.family) {
             continue;
         }
-        if !cidr_contains_v4(&rule.dst, p.dst_addr_be) {
+        if !cidr_contains(&rule.dst, &p.dst_addr, p.family) {
             continue;
         }
         if rule.dst_port_max != 0

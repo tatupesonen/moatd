@@ -117,9 +117,10 @@ pub struct GlobalConfig {
 #[derive(Copy, Clone)]
 pub struct ConnKey {
     pub proto: u8,
-    pub _pad: [u8; 3],
-    pub src_addr_be: u32,
-    pub dst_addr_be: u32,
+    pub family: u8,
+    pub _pad: [u8; 2],
+    pub src_addr: [u8; 16],
+    pub dst_addr: [u8; 16],
     pub src_port: u16,
     pub dst_port: u16,
 }

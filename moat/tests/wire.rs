@@ -1,5 +1,5 @@
 use moat_common::control::{Action, Direction, Protocol, UserRule};
-use moat_common::{FAMILY_V4, IFACE_ANY, PROTO_TCP};
+use moat_common::{FAMILY_V4, FAMILY_V6, IFACE_ANY, PROTO_TCP};
 
 #[test]
 fn cidr_v4_with_prefix() {
@@ -65,6 +65,62 @@ fn invalid_cidr_rejected() {
         proto: None,
         src: Some("not-an-ip".into()),
         dst: None,
+        src_port: None,
+        dst_port: None,
+    };
+    assert!(moat::wire::build_wire_rule(&r, 0, IFACE_ANY).is_err());
+}
+
+#[test]
+fn cidr_v6_with_prefix() {
+    let r = UserRule {
+        direction: Direction::In,
+        action: Action::Allow,
+        iface: None,
+        proto: Some(Protocol::Tcp),
+        src: Some("fe80::/10".into()),
+        dst: None,
+        src_port: None,
+        dst_port: Some("22".into()),
+    };
+    let wire = moat::wire::build_wire_rule(&r, 0, IFACE_ANY).unwrap();
+    assert_eq!(wire.src.family, FAMILY_V6);
+    assert_eq!(wire.src.prefix, 10);
+    assert_eq!(wire.src.addr[0], 0xfe);
+    assert_eq!(wire.src.addr[1], 0x80);
+    assert_eq!(wire.dst.family, FAMILY_V6);
+    assert_eq!(wire.dst.prefix, 0);
+}
+
+#[test]
+fn cidr_v6_host_default_prefix() {
+    let r = UserRule {
+        direction: Direction::In,
+        action: Action::Deny,
+        iface: None,
+        proto: None,
+        src: Some("2001:db8::1".into()),
+        dst: None,
+        src_port: None,
+        dst_port: None,
+    };
+    let wire = moat::wire::build_wire_rule(&r, 0, IFACE_ANY).unwrap();
+    assert_eq!(wire.src.family, FAMILY_V6);
+    assert_eq!(wire.src.prefix, 128);
+    assert_eq!(wire.src.addr[0], 0x20);
+    assert_eq!(wire.src.addr[1], 0x01);
+    assert_eq!(wire.src.addr[15], 0x01);
+}
+
+#[test]
+fn mixed_v4_v6_rejected() {
+    let r = UserRule {
+        direction: Direction::In,
+        action: Action::Allow,
+        iface: None,
+        proto: None,
+        src: Some("10.0.0.0/8".into()),
+        dst: Some("::/0".into()),
         src_port: None,
         dst_port: None,
     };

@@ -185,6 +185,18 @@ mod tests {
         assert_eq!(d, Direction::In);
         assert_eq!(a, Action::Deny);
     }
+
+    #[test]
+    fn v6_cidr_in_grammar() {
+        let r = parse_rule_spec(
+            Action::Deny,
+            &tok("in from fe80::/10 to any port 80 proto tcp"),
+        )
+        .unwrap();
+        assert_eq!(r.src.as_deref(), Some("fe80::/10"));
+        assert_eq!(r.dst_port.as_deref(), Some("80"));
+        assert_eq!(r.proto, Some(Protocol::Tcp));
+    }
 }
 
 pub fn parse_default_args(args: &[String]) -> Result<(Direction, Action)> {
