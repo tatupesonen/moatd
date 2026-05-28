@@ -90,20 +90,33 @@ jobs:
             cargo install bpf-linker --locked
           fi
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install runtime tools
         run: |
           sudo apt-get update -y
+          # `bpftool` is a virtual package on noble; the real binary ships in the
+          # versioned linux-tools matching the running kernel.
           sudo apt-get install -y --no-install-recommends \
-            iproute2 netcat-openbsd iputils-ping linux-tools-common bpftool
+            iproute2 netcat-openbsd iputils-ping \
+            linux-tools-common "linux-tools-$(uname -r)"
 
       - name: Build
         run: cargo build
+
+      - name: Sync test dependencies
+        working-directory: tests/integration
+        run: uv sync
 
       - name: Kernel info
         run: |
           uname -a
           ip -V
-          bpftool --version | head -1
+          bpftool version | head -1
 
       - name: Integration tests
-        run: sudo --preserve-env=PATH bash tests/integration/run.sh
+        # run-vng.sh (kernel matrix) needs /dev/kvm, which hosted runners lack;
+        # here the netns suite runs directly against the runner kernel. perf is
+        # deselected (timing-sensitive on shared CI).
+        run: sudo tests/integration/.venv/bin/python -m pytest tests/integration -m "not perf" -q
