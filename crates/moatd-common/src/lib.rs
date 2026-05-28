@@ -2,6 +2,11 @@
 
 pub const SCHEMA_VERSION: u8 = 1;
 pub const RULES_MAX: u32 = 256;
+// Rules are double-buffered: the RULES array holds two banks of RULES_MAX
+// slots. The loader writes the inactive bank, then flips CONFIG.active_bank, so
+// the data path never reads a half-written rule.
+pub const RULE_BANKS: u32 = 2;
+pub const RULES_SLOTS: u32 = RULES_MAX * RULE_BANKS;
 pub const RINGBUF_BYTES: u32 = 256 * 1024;
 
 pub const POLICY_IN: u32 = 0;
@@ -27,8 +32,18 @@ pub const FAMILY_V6: u8 = 6;
 pub const IFACE_ANY: u32 = 0;
 pub const IFACE_ABSENT: u32 = u32::MAX;
 
+/// A syntactically valid Linux interface name (IFNAMSIZ is 16 incl. NUL).
+pub fn valid_iface_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 15 && !name.bytes().any(|b| b == b'/' || b == b' ' || b == 0)
+}
+
 pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
-pub const CONNTRACK_TTL_NS: u64 = 60_000_000_000;
+// 2h, so idle TCP sessions (SSH, DB) survive well past typical keepalive gaps.
+// LRU eviction handles pressure; the egress-only refresh still bounds spoofing.
+pub const CONNTRACK_TTL_NS: u64 = 7_200_000_000_000;
+// An established egress flow refreshes its conntrack entry at most this often,
+// rather than on every packet, to keep the hot path off the map write path.
+pub const CONNTRACK_REFRESH_NS: u64 = 10_000_000_000;
 
 pub const LOG_BUCKET_MAX: u32 = 100;
 pub const LOG_BUCKET_REFILL_NS: u64 = 10_000_000; // ~100 tokens/s/CPU
@@ -112,7 +127,10 @@ pub struct DropEvent {
 pub struct GlobalConfig {
     pub logging_enabled: u8,
     pub log_level: u8,
-    pub _pad: [u8; 6],
+    pub active_bank: u8,
+    pub _pad: u8,
+    pub rule_count: u16,
+    pub _pad2: u16,
 }
 
 #[repr(C)]

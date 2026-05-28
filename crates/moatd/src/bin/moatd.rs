@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use aya::{
     include_bytes_aligned,
-    maps::{ring_buf::RingBuf, Array, MapData},
+    maps::{ring_buf::RingBuf, Array, HashMap as BpfHashMap, MapData},
     programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
     Ebpf,
 };
@@ -288,6 +288,7 @@ struct DaemonState {
     attached_interfaces: Vec<String>,
     on_disk: OnDisk,
     maps: Maps,
+    active_bank: u8,
 }
 
 async fn run_daemon() -> Result<()> {
@@ -356,7 +357,7 @@ async fn run_daemon() -> Result<()> {
         }
     };
 
-    let mut state = DaemonState { attached_interfaces: attached, on_disk, maps };
+    let mut state = DaemonState { attached_interfaces: attached, on_disk, maps, active_bank: 0 };
     sync_all(&mut state).context("initial sync to BPF maps")?;
 
     let shared = Arc::new(Mutex::new(state));
@@ -428,6 +429,22 @@ fn attach_to_iface(ebpf: &mut Ebpf, iface: &str) -> Result<()> {
             .try_into()?;
         tc_prog.attach(iface, TcAttachType::Egress).context("TC egress attach")?;
     }
+    // Tell the data path how many L2 bytes precede the IP header on this
+    // interface (0 for tun/wireguard, 14 for Ethernet). Without this, raw-L3
+    // interfaces like tailscale0 would be parsed as if they had an Ethernet
+    // header and silently pass all traffic.
+    if let Some(ifindex) = wire::iface_ifindex(iface) {
+        if let Err(e) = set_iface_l2(ebpf, ifindex, wire::iface_l2_len(iface)) {
+            warn!(iface, error = %e, "recording interface L2 offset failed");
+        }
+    }
+    Ok(())
+}
+
+fn set_iface_l2(ebpf: &mut Ebpf, ifindex: u32, l2_len: u8) -> Result<()> {
+    let map = ebpf.map_mut("IFACE_L2").context("IFACE_L2 map missing")?;
+    let mut iface_l2: BpfHashMap<_, u32, u8> = BpfHashMap::try_from(map)?;
+    iface_l2.insert(ifindex, l2_len, 0)?;
     Ok(())
 }
 
@@ -480,7 +497,6 @@ fn take_maps(ebpf: &mut Ebpf) -> Result<Maps> {
 
 fn sync_all(state: &mut DaemonState) -> Result<()> {
     sync_defaults(state)?;
-    sync_config(state)?;
     sync_rules(state)?;
     Ok(())
 }
@@ -491,11 +507,17 @@ fn sync_defaults(state: &mut DaemonState) -> Result<()> {
     Ok(())
 }
 
-fn sync_config(state: &mut DaemonState) -> Result<()> {
+// Writes the full GlobalConfig. This doubles as the rule double-buffer flip:
+// it publishes active_bank + rule_count, so it must run only after the target
+// bank's slots are fully written.
+fn write_config(state: &mut DaemonState) -> Result<()> {
     let cfg = GlobalConfig {
         logging_enabled: u8::from(state.on_disk.logging_enabled),
         log_level: 0,
-        _pad: [0; 6],
+        active_bank: state.active_bank,
+        _pad: 0,
+        rule_count: state.on_disk.rules.len().min(RULES_MAX as usize) as u16,
+        _pad2: 0,
     };
     state.maps.config.set(0, cfg, 0)?;
     Ok(())
@@ -513,11 +535,15 @@ fn sync_rules(state: &mut DaemonState) -> Result<()> {
         wire_rules.push(wire::build_wire_rule(ur, iface_ifindex)?);
     }
 
-    for i in 0..RULES_MAX {
-        let slot = wire_rules.get(i as usize).copied().unwrap_or_else(wire::empty_wire_rule);
-        state.maps.rules.set(i, slot, 0)?;
+    // Write the inactive bank, then flip to it. A concurrent packet keeps
+    // reading the current bank until write_config publishes the switch.
+    let target = 1 - state.active_bank;
+    let base = u32::from(target) * RULES_MAX;
+    for (i, rule) in wire_rules.iter().take(RULES_MAX as usize).enumerate() {
+        state.maps.rules.set(base + i as u32, *rule, 0)?;
     }
-    Ok(())
+    state.active_bank = target;
+    write_config(state)
 }
 
 fn bind_control_socket() -> Result<UnixListener> {
@@ -602,10 +628,7 @@ fn add_rule(state: &mut DaemonState, rule: UserRule) -> Result<()> {
 }
 
 fn validate_iface_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.len() > 15 {
-        anyhow::bail!("invalid interface name `{name}`");
-    }
-    if name.bytes().any(|b| b == b'/' || b == b' ' || b == 0) {
+    if !moatd_common::valid_iface_name(name) {
         anyhow::bail!("invalid interface name `{name}`");
     }
     Ok(())

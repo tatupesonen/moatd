@@ -1,61 +1,69 @@
-# moat integration tests
+# moatd integration tests
 
-Network-namespace integration tests for the moat firewall. Each scenario:
+Network-namespace integration tests for the moatd firewall, written in Python
+(pytest) and managed with [uv](https://docs.astral.sh/uv/). Each test:
 
-1. Creates a fresh pair of `ip netns` connected by a veth pair (`moat-h` / `moat-c`).
-2. Starts `moatd` inside `moat-h` with `MOAT_INTERFACES=mvethH`.
-3. Configures rules via the `moat` CLI.
-4. Drives traffic from `moat-c` with `nc` / `ping` and asserts pass / blocked.
-5. Tears down the netns pair and removes `/etc/moatd/rules.toml`.
+1. Creates a fresh host/client netns pair joined by a veth (`Topology`).
+2. Runs `moatd` inside the host netns (`Moatd`), driving it via the CLI.
+3. Sends real traffic (`nc`/`ping`) or crafted packets (scapy) and asserts
+   pass/blocked — by connectivity, by the daemon's BLOCK log, or via `bpftool`.
+4. Tears everything down.
 
-## Running locally
+The eBPF object is loaded into the **real kernel**, so the verifier and the
+data path are exercised for real.
 
-Two steps because `cargo` needs to run as your normal user (the toolchain is
-in your `$PATH`, not root's) and the test runner needs root for `ip netns`:
-
-```sh
-cargo build
-sudo make integration-test
-```
-
-Equivalently, without the Makefile:
+## Running
 
 ```sh
-cargo build
-sudo tests/integration/run.sh
+cargo build                  # build moatd/moat as your user
+make integration-test        # uv sync + sudo pytest (root needed for netns)
 ```
 
-Run a single scenario:
+Or directly:
 
 ```sh
-sudo bash tests/integration/scenarios/03-default-deny-in.sh
+cd tests/integration
+uv sync
+sudo .venv/bin/python -m pytest                 # everything except perf
+sudo .venv/bin/python -m pytest -m perf         # perf characterization only
+sudo .venv/bin/python -m pytest -m 'not scapy'  # skip crafted-packet tests
+sudo .venv/bin/python -m pytest tests/test_cidr.py
 ```
+
+> If the installed `moatd` service is running it owns
+> `/run/moatd/control.sock` and the suite refuses to start. Stop it first:
+> `sudo systemctl stop moatd`.
+
+## Across kernel versions (virtme-ng)
+
+`run-vng.sh` boots the suite inside a throwaway VM, exercising the program
+against a specific kernel without touching the host:
+
+```sh
+./run-vng.sh                       # current host kernel
+./run-vng.sh /path/to/bzImage ...  # one or more kernels (a matrix)
+```
+
+Needs `vng` (`apt install virtme-ng`) and `/dev/kvm`.
 
 ## Requirements
 
-- Linux kernel >= 6.1 (TCX requires 6.6+, falls back to classic clsact otherwise)
-- root
-- tools: `ip`, `nc` (openbsd-netcat), `ping`, `bpftool`
-- moatd + moat built (`cargo build`)
+- root (netns); `/dev/kvm` for the vng runner
+- tools: `ip`, `nc` (openbsd-netcat), `ping`, `bpftool`, `iperf3` (perf test)
+- `uv`; the Python deps (`pytest`, `scapy`) come from `uv sync`
+
+## Markers
+
+- `scapy` — crafts raw packets (IPv6 ext headers, fragments, VLAN tags)
+- `perf` — slower, timing-sensitive; opt-in
 
 ## Layout
 
 ```
 tests/integration/
-├── lib.sh         shared bash helpers
-├── run.sh         runner (serial, prints pass/fail per scenario)
-└── scenarios/     individual scenarios, sorted by number
+├── pyproject.toml      uv project + pytest config
+├── conftest.py         fixtures (topo, moatd) + root/foreign-daemon preflight
+├── moatlib/            netns, daemon, traffic, bpf, scapy senders
+├── tests/              one file per area
+└── run-vng.sh          kernel-matrix runner
 ```
-
-Each scenario sources `lib.sh`, calls `setup_netns`, `start_moatd`, and uses
-`expect_pass` / `expect_blocked` for assertions. `trap cleanup EXIT` ensures
-namespaces and the daemon are cleaned up even on failure.
-
-## Notes
-
-- The daemon is run *inside* the netns; the `moat` CLI runs in the root netns
-  and talks to the daemon via the shared `/run/moatd/control.sock` (mount
-  namespaces are shared between netns).
-- `MOAT_INTERFACES=mvethH` makes the daemon attach only to the test veth and
-  ignore the host's real NICs.
-- Scenarios run serially (each consumes the global socket path and rule file).

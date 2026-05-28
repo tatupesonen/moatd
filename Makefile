@@ -49,11 +49,8 @@ integration-test:
 		echo "moatd / moat binaries missing. Run 'cargo build' (without sudo) first."; \
 		exit 1; \
 	fi
-	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "integration-test needs root (uses ip netns). Re-run with sudo."; \
-		exit 1; \
-	fi
-	tests/integration/run.sh
+	cd tests/integration && uv sync
+	sudo tests/integration/.venv/bin/python -m pytest tests/integration
 
 clean:
 	$(CARGO) clean

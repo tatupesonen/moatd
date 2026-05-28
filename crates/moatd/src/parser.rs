@@ -76,58 +76,71 @@ fn parse_full_grammar(action: Action, tokens: &[String]) -> Result<UserRule> {
 
     let mut iter = tokens.iter().peekable();
 
+    let mut dir_set = false;
+    let (mut from_seen, mut to_seen) = (false, false);
+
     while let Some(tok) = iter.peek() {
-        match tok.as_str() {
-            "in" => {
-                rule.direction = Direction::In;
-                iter.next();
-            }
-            "out" => {
-                rule.direction = Direction::Out;
-                iter.next();
-            }
+        let dir = match tok.as_str() {
+            "in" => Direction::In,
+            "out" => Direction::Out,
             _ => break,
+        };
+        if dir_set {
+            bail!("direction specified more than once");
         }
+        rule.direction = dir;
+        dir_set = true;
+        iter.next();
     }
 
     while let Some(tok) = iter.next() {
         match tok.as_str() {
             "on" => {
+                if rule.iface.is_some() {
+                    bail!("`on` specified more than once");
+                }
                 let iface = iter.next().context("expected interface after `on`")?;
                 validate_iface(iface)?;
                 rule.iface = Some(iface.clone());
             }
             "from" => {
+                if from_seen {
+                    bail!("`from` specified more than once");
+                }
+                from_seen = true;
                 let cidr = iter.next().context("expected address after `from`")?;
                 if cidr != "any" {
                     rule.src = Some(cidr.clone());
                 }
-                if let Some(next) = iter.peek() {
-                    if next.as_str() == "port" {
-                        iter.next();
-                        let p = iter.next().context("expected port after `port`")?;
-                        rule.src_port = Some(p.clone());
-                    }
+                if iter.peek().is_some_and(|n| n.as_str() == "port") {
+                    iter.next();
+                    let p = iter.next().context("expected port after `port`")?;
+                    rule.src_port = Some(p.clone());
                 }
             }
             "to" => {
+                if to_seen {
+                    bail!("`to` specified more than once");
+                }
+                to_seen = true;
                 let cidr = iter.next().context("expected address after `to`")?;
                 if cidr != "any" {
                     rule.dst = Some(cidr.clone());
                 }
-                if let Some(next) = iter.peek() {
-                    if next.as_str() == "port" {
-                        iter.next();
-                        let p = iter.next().context("expected port after `port`")?;
-                        rule.dst_port = Some(p.clone());
-                    }
+                if iter.peek().is_some_and(|n| n.as_str() == "port") {
+                    iter.next();
+                    let p = iter.next().context("expected port after `port`")?;
+                    set_dst_port(&mut rule, p)?;
                 }
             }
             "port" => {
                 let p = iter.next().context("expected port after `port`")?;
-                rule.dst_port = Some(p.clone());
+                set_dst_port(&mut rule, p)?;
             }
             "proto" => {
+                if rule.proto.is_some() {
+                    bail!("`proto` specified more than once");
+                }
                 let p = iter.next().context("expected protocol after `proto`")?;
                 rule.proto = Some(parse_proto(p)?);
             }
@@ -136,6 +149,14 @@ fn parse_full_grammar(action: Action, tokens: &[String]) -> Result<UserRule> {
     }
 
     Ok(rule)
+}
+
+fn set_dst_port(rule: &mut UserRule, port: &str) -> Result<()> {
+    if rule.dst_port.is_some() {
+        bail!("destination port specified more than once");
+    }
+    rule.dst_port = Some(port.to_string());
+    Ok(())
 }
 
 fn parse_proto(s: &str) -> Result<Protocol> {
@@ -149,10 +170,7 @@ fn parse_proto(s: &str) -> Result<Protocol> {
 }
 
 fn validate_iface(name: &str) -> Result<()> {
-    if name.is_empty() || name.len() > 15 {
-        bail!("invalid interface name `{name}`");
-    }
-    if name.contains('/') || name.contains(' ') {
+    if !moatd_common::valid_iface_name(name) {
         bail!("invalid interface name `{name}`");
     }
     Ok(())
@@ -229,6 +247,16 @@ mod tests {
     fn rejects_unknown_token() {
         // "oops" isn't a known token AND isn't an app profile -> error.
         assert!(parse_rule_spec(Action::Allow, &tok("port 22 oops")).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_and_conflicting_tokens() {
+        assert!(parse_rule_spec(Action::Allow, &tok("in out port 22")).is_err());
+        assert!(parse_rule_spec(Action::Allow, &tok("from 1.1.1.1 from 2.2.2.2 port 22")).is_err());
+        assert!(parse_rule_spec(Action::Allow, &tok("port 22 port 80")).is_err());
+        assert!(parse_rule_spec(Action::Allow, &tok("to any port 22 port 80")).is_err());
+        assert!(parse_rule_spec(Action::Allow, &tok("on eth0 on eth1 port 22")).is_err());
+        assert!(parse_rule_spec(Action::Allow, &tok("port 22 proto tcp proto udp")).is_err());
     }
 
     #[test]
