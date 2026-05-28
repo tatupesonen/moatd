@@ -330,6 +330,9 @@ async fn run_daemon() -> Result<()> {
         Err(e) => warn!(error = %e, "block-event logging unavailable"),
     }
 
+    // Note: this needs to run AFTER initial sync_all so the watcher's
+    // comparison baseline is established below.
+
     let on_disk = match store::load(RULES_FILE) {
         Ok(o) => o,
         Err(e) => {
@@ -342,6 +345,8 @@ async fn run_daemon() -> Result<()> {
     sync_all(&mut state).context("initial sync to BPF maps")?;
 
     let shared = Arc::new(Mutex::new(state));
+
+    tokio::spawn(watch_interfaces(Arc::clone(&shared)));
 
     let listener = bind_control_socket().context("binding control socket")?;
     info!(path = SOCKET_PATH, "control socket listening");
@@ -389,11 +394,18 @@ fn init_daemon_tracing() {
 
     let filter = || EnvFilter::try_from_env("MOAT_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
 
-    if let Ok(journald) = tracing_journald::layer() {
-        tracing_subscriber::registry().with(filter()).with(journald).init();
-    } else {
-        tracing_subscriber::registry().with(filter()).with(tracing_subscriber::fmt::layer()).init();
+    // MOAT_LOG_STDOUT=1 forces stderr/stdout tracing instead of journald, which
+    // is useful in tests where the host's journald socket is reachable from
+    // inside an `ip netns exec` but we want to inspect logs by reading the
+    // process's stdout/stderr capture file.
+    let force_stdout = std::env::var_os("MOAT_LOG_STDOUT").is_some();
+    if !force_stdout {
+        if let Ok(journald) = tracing_journald::layer() {
+            tracing_subscriber::registry().with(filter()).with(journald).init();
+            return;
+        }
     }
+    tracing_subscriber::registry().with(filter()).with(tracing_subscriber::fmt::layer()).init();
 }
 
 fn enumerate_interfaces() -> Result<Vec<String>> {
@@ -632,6 +644,50 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
     stream.write_all(payload).await?;
     stream.flush().await?;
     Ok(())
+}
+
+// =====================================================================
+// Link watcher: polls /sys/class/net every 2s and re-syncs the RULES
+// map when an interface referenced by a rule appears, disappears, or
+// changes operstate. This is a lightweight stand-in for netlink
+// subscription; reactivity is bounded by the poll interval but the
+// behaviour is identical from the rule's point of view.
+// =====================================================================
+
+const IFACE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+async fn watch_interfaces(shared: Arc<Mutex<DaemonState>>) {
+    let mut tick = tokio::time::interval(IFACE_POLL_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last = wire::iface_snapshot();
+    loop {
+        tick.tick().await;
+        let current = wire::iface_snapshot();
+        if current == last {
+            continue;
+        }
+        let changed: Vec<String> = current
+            .iter()
+            .filter(|(k, v)| last.get(*k) != Some(*v))
+            .chain(last.iter().filter(|(k, _)| !current.contains_key(*k)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let touches_rules = {
+            let s = shared.lock().await;
+            s.on_disk
+                .rules
+                .iter()
+                .any(|r| r.iface.as_deref().is_some_and(|name| changed.iter().any(|c| c == name)))
+        };
+        if touches_rules {
+            info!(?changed, "interface change touched a rule, re-syncing");
+            let mut s = shared.lock().await;
+            if let Err(e) = sync_rules(&mut s) {
+                warn!(error = %e, "iface change sync failed");
+            }
+        }
+        last = current;
+    }
 }
 
 // =====================================================================

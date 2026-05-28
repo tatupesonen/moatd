@@ -97,10 +97,40 @@ fn any_cidr(family: u8) -> moatd_common::IpCidr {
 
 pub fn resolve_iface(name: Option<&str>) -> u32 {
     let Some(name) = name else { return IFACE_ANY };
+    // An interface that exists but is administratively down should NOT match
+    // packets (there shouldn't be any), but more importantly we want the
+    // link-watcher to flip the rule to IFACE_ABSENT on link-down so the
+    // sentinel matches the documented behavior. Many virtual interfaces
+    // (tun, tailscale0, wireguard) report operstate "unknown" while
+    // operational, so we accept both "up" and "unknown".
+    let operstate = std::fs::read_to_string(format!("/sys/class/net/{name}/operstate")).ok();
+    let is_up = matches!(operstate.as_deref().map(str::trim), Some("up") | Some("unknown"));
+    if !is_up {
+        return IFACE_ABSENT;
+    }
     match std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex")) {
         Ok(s) => s.trim().parse::<u32>().unwrap_or(IFACE_ABSENT),
         Err(_) => IFACE_ABSENT,
     }
+}
+
+/// Snapshot of currently-existing interfaces and whether they are up.
+/// Used by the link watcher to detect changes worth re-syncing on.
+pub fn iface_snapshot() -> std::collections::HashMap<String, (u32, bool)> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/sys/class/net") else { return out };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ifindex = std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        let operstate = std::fs::read_to_string(format!("/sys/class/net/{name}/operstate")).ok();
+        let is_up = matches!(operstate.as_deref().map(str::trim), Some("up") | Some("unknown"));
+        if let Some(idx) = ifindex {
+            out.insert(name, (idx, is_up));
+        }
+    }
+    out
 }
 
 pub fn parse_cidr(s: &str) -> Result<moatd_common::IpCidr> {

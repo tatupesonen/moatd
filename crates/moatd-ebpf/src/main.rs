@@ -279,8 +279,7 @@ fn parse_icmp(
     // harmless here because non-echo flows are unlikely to match anything in
     // CONNTRACK anyway.
     let head: *const IcmpHead = unsafe { ptr_at_data(data, data_end, l4_off)? };
-    let icmp_type =
-        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*head).ty)) };
+    let icmp_type = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*head).ty)) };
     let id_be = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*head).id)) };
     let id = u16::from_be(id_be);
     // Store the id in BOTH port slots so the ConnKey reverse-swap done at
