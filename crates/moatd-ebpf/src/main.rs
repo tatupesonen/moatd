@@ -249,13 +249,44 @@ fn parse_l4(
             let dest = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*udp).dest)) };
             (u16::from_be(source), u16::from_be(dest), PROTO_UDP, 0)
         }
-        IpProto::Icmp if !is_v6 => (0, 0, PROTO_ICMP, 0),
-        IpProto::Ipv6Icmp if is_v6 => {
-            let ty_ptr: *const u8 = unsafe { ptr_at_data(data, data_end, l4_off)? };
-            (0, 0, PROTO_ICMPV6, unsafe { core::ptr::read_unaligned(ty_ptr) })
-        }
+        IpProto::Icmp if !is_v6 => parse_icmp(data, data_end, l4_off, PROTO_ICMP)?,
+        IpProto::Ipv6Icmp if is_v6 => parse_icmp(data, data_end, l4_off, PROTO_ICMPV6)?,
         _ => (0, 0, PROTO_ANY, 0),
     })
+}
+
+#[repr(C)]
+struct IcmpHead {
+    ty: u8,
+    code: u8,
+    checksum: u16,
+    id: u16,
+    seq: u16,
+}
+
+#[inline(always)]
+fn parse_icmp(
+    data: usize,
+    data_end: usize,
+    l4_off: usize,
+    proto: u8,
+) -> Result<(u16, u16, u8, u8), ()> {
+    // Read the type and id fields in one bounded packet access so the verifier
+    // sees a single packet-range proof for both bytes. Two separate
+    // `ptr_at_data` calls trip the verifier on some kernels because it loses
+    // track of overlapping bounds. Echo request and echo reply share the same
+    // id; other ICMP types reuse these bytes for other purposes, which is
+    // harmless here because non-echo flows are unlikely to match anything in
+    // CONNTRACK anyway.
+    let head: *const IcmpHead = unsafe { ptr_at_data(data, data_end, l4_off)? };
+    let icmp_type =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*head).ty)) };
+    let id_be = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*head).id)) };
+    let id = u16::from_be(id_be);
+    // Store the id in BOTH port slots so the ConnKey reverse-swap done at
+    // XDP ingress lookup is a no-op for ICMP -- request and reply share the
+    // same id, so a symmetric key matches in either direction.
+    Ok((id, id, proto, icmp_type))
 }
 
 #[inline(always)]
