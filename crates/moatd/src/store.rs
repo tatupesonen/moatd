@@ -51,16 +51,14 @@ pub fn load(path: impl AsRef<Path>) -> Result<OnDisk> {
             rules: Vec::new(),
         });
     }
-    let bytes = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let bytes = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
 pub fn save(path: impl AsRef<Path>, on_disk: &OnDisk) -> Result<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o750));
     }
     let body = toml::to_string_pretty(on_disk)?;

@@ -3,21 +3,15 @@ use aya_build::Toolchain;
 use cargo_metadata::{Metadata, MetadataCommand, Package};
 
 fn main() -> Result<()> {
-    let Metadata { packages, .. } = MetadataCommand::new()
-        .no_deps()
-        .exec()
-        .context("cargo metadata")?;
+    let Metadata { packages, .. } =
+        MetadataCommand::new().no_deps().exec().context("cargo metadata")?;
 
     let ebpf_pkg = packages
         .into_iter()
         .find(|Package { name, .. }| name.as_str() == "moatd-ebpf")
         .ok_or_else(|| anyhow!("moatd-ebpf package not found in workspace"))?;
 
-    let Package {
-        name,
-        manifest_path,
-        ..
-    } = ebpf_pkg;
+    let Package { name, manifest_path, .. } = ebpf_pkg;
     let root_dir = manifest_path
         .parent()
         .ok_or_else(|| anyhow!("no parent dir for {manifest_path}"))?

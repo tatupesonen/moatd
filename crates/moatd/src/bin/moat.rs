@@ -65,30 +65,30 @@ fn main() -> Result<()> {
         Cmd::Disable => disable(),
         Cmd::Status => status(),
         Cmd::List => list(),
-        Cmd::Allow { spec } => add(Action::Allow, spec),
-        Cmd::Deny { spec } => add(Action::Deny, spec),
-        Cmd::Reject { spec } => add(Action::Reject, spec),
+        Cmd::Allow { spec } => add(Action::Allow, &spec),
+        Cmd::Deny { spec } => add(Action::Deny, &spec),
+        Cmd::Reject { spec } => add(Action::Reject, &spec),
         Cmd::Default { args } => {
             let (direction, action) = parser::parse_default_args(&args)?;
-            simple_ok(call(Request::SetDefault { direction, action })?, "default updated")
+            simple_ok(call(&Request::SetDefault { direction, action })?, "default updated")
         }
-        Cmd::Delete { index } => simple_ok(call(Request::DeleteRule(index))?, "rule deleted"),
-        Cmd::Reset => simple_ok(call(Request::Reset)?, "firewall reset"),
+        Cmd::Delete { index } => simple_ok(call(&Request::DeleteRule(index))?, "rule deleted"),
+        Cmd::Reset => simple_ok(call(&Request::Reset)?, "firewall reset"),
         Cmd::Logging { value } => {
             let enabled = match value.as_str() {
                 "on" | "true" | "yes" => true,
                 "off" | "false" | "no" => false,
                 _ => anyhow::bail!("logging value must be on/off"),
             };
-            simple_ok(call(Request::SetLogging { enabled })?, "logging updated")
+            simple_ok(call(&Request::SetLogging { enabled })?, "logging updated")
         }
         Cmd::Ping => ping(),
     }
 }
 
-fn add(action: Action, spec: Vec<String>) -> Result<()> {
-    let rule = parser::parse_rule_spec(action, &spec)?;
-    simple_ok(call(Request::AddRule(rule))?, "rule added")
+fn add(action: Action, spec: &[String]) -> Result<()> {
+    let rule = parser::parse_rule_spec(action, spec)?;
+    simple_ok(call(&Request::AddRule(rule))?, "rule added")
 }
 
 fn simple_ok(resp: Response, msg: &str) -> Result<()> {
@@ -115,7 +115,7 @@ fn disable() -> Result<()> {
 }
 
 fn status() -> Result<()> {
-    match call(Request::Status)? {
+    match call(&Request::Status)? {
         Response::Status(s) => {
             println!("Status:      {}", if s.active { "active" } else { "inactive" });
             println!("Schema:      v{}", s.schema_version);
@@ -139,7 +139,7 @@ fn status() -> Result<()> {
 }
 
 fn list() -> Result<()> {
-    match call(Request::ListRules)? {
+    match call(&Request::ListRules)? {
         Response::Rules(rs) => {
             if rs.is_empty() {
                 println!("(no rules)");
@@ -179,7 +179,7 @@ fn render_rule(r: &UserRule) -> String {
 }
 
 fn ping() -> Result<()> {
-    match call(Request::Ping)? {
+    match call(&Request::Ping)? {
         Response::Pong => {
             println!("pong");
             Ok(())
@@ -189,26 +189,21 @@ fn ping() -> Result<()> {
 }
 
 fn run_systemctl(args: &[&str]) -> Result<()> {
-    let status = Command::new("systemctl")
-        .args(args)
-        .status()
-        .context("invoking systemctl")?;
+    let status = Command::new("systemctl").args(args).status().context("invoking systemctl")?;
     if !status.success() {
         anyhow::bail!("systemctl {} failed (exit {})", args.join(" "), status);
     }
     Ok(())
 }
 
-fn call(req: Request) -> Result<Response> {
+fn call(req: &Request) -> Result<Response> {
     let mut stream = UnixStream::connect(SOCKET_PATH)
         .with_context(|| format!("connecting to {SOCKET_PATH} (is moatd running?)"))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
-    let bytes = serde_json::to_vec(&req)?;
-    let len = u32::try_from(bytes.len())
-        .context("request too large")?
-        .to_be_bytes();
+    let bytes = serde_json::to_vec(req)?;
+    let len = u32::try_from(bytes.len()).context("request too large")?.to_be_bytes();
     stream.write_all(&len)?;
     stream.write_all(&bytes)?;
 

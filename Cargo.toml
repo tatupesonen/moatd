@@ -44,3 +44,37 @@ strip = "debuginfo"
 [profile.release.package.moatd-ebpf]
 debug = 2
 codegen-units = 1
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn   = "warn"
+unused_lifetimes         = "warn"
+unused_extern_crates     = "warn"
+elided_lifetimes_in_paths = "warn"
+trivial_casts            = "warn"
+trivial_numeric_casts    = "warn"
+unreachable_pub          = "warn"
+
+[workspace.lints.clippy]
+all      = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Selectively enable a few restriction lints.
+unwrap_used    = "warn"
+panic          = "warn"
+todo           = "warn"
+unimplemented  = "warn"
+dbg_macro      = "warn"
+mem_forget     = "warn"
+
+# Pedantic lints we accept (high priority overrides the group).
+pub_underscore_fields    = "allow"   # `_pad` placeholders are intentional and need to be pub
+must_use_candidate       = "allow"   # noisy on small helpers
+return_self_not_must_use = "allow"
+module_name_repetitions  = "allow"
+similar_names            = "allow"   # src_addr / dst_addr is intentional
+missing_errors_doc       = "allow"
+missing_panics_doc       = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss           = "allow"
+cast_lossless            = "allow"
+cast_possible_wrap       = "allow"

@@ -9,7 +9,9 @@ use aya::{
     programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
     Ebpf,
 };
-use moatd_common::control::{Action, Direction, Request, Response, StatusReport, UserRule, SOCKET_PATH};
+use moatd_common::control::{
+    Action, Direction, Request, Response, StatusReport, UserRule, SOCKET_PATH,
+};
 use moatd_common::{GlobalConfig, Rule, POLICY_IN, POLICY_OUT, RULES_MAX, SCHEMA_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -93,11 +95,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let mut state = DaemonState {
-        attached_interfaces: attached,
-        on_disk,
-        maps,
-    };
+    let mut state = DaemonState { attached_interfaces: attached, on_disk, maps };
     sync_all(&mut state).context("initial sync to BPF maps")?;
 
     let shared = Arc::new(Mutex::new(state));
@@ -149,25 +147,16 @@ fn init_tracing() {
     let filter = || EnvFilter::try_from_env("MOAT_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
 
     if let Ok(journald) = tracing_journald::layer() {
-        tracing_subscriber::registry()
-            .with(filter())
-            .with(journald)
-            .init();
+        tracing_subscriber::registry().with(filter()).with(journald).init();
     } else {
-        tracing_subscriber::registry()
-            .with(filter())
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        tracing_subscriber::registry().with(filter()).with(tracing_subscriber::fmt::layer()).init();
     }
 }
 
 fn enumerate_interfaces() -> Result<Vec<String>> {
     if let Ok(val) = std::env::var("MOAT_INTERFACES") {
-        let ifs: Vec<String> = val
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let ifs: Vec<String> =
+            val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         if ifs.is_empty() {
             anyhow::bail!("MOAT_INTERFACES is set but empty");
         }
@@ -194,31 +183,21 @@ fn is_skipped_iface(name: &str) -> bool {
 }
 
 fn attach_xdp_with_fallback(prog: &mut Xdp, iface: &str) -> Result<&'static str> {
-    match prog.attach(iface, XdpFlags::DRV_MODE) {
-        Ok(_) => Ok("drv"),
-        Err(_) => {
-            prog.attach(iface, XdpFlags::SKB_MODE)
-                .context("XDP attach (SKB_MODE)")?;
-            Ok("skb")
-        }
+    if prog.attach(iface, XdpFlags::DRV_MODE).is_ok() {
+        return Ok("drv");
     }
+    prog.attach(iface, XdpFlags::SKB_MODE).context("XDP attach (SKB_MODE)")?;
+    Ok("skb")
 }
 
 fn take_maps(ebpf: &mut Ebpf) -> Result<Maps> {
-    let rules: Array<MapData, Rule> = Array::try_from(
-        ebpf.take_map("RULES").context("RULES map missing")?,
-    )?;
-    let default_policy: Array<MapData, u8> = Array::try_from(
-        ebpf.take_map("DEFAULT_POLICY").context("DEFAULT_POLICY map missing")?,
-    )?;
-    let config: Array<MapData, GlobalConfig> = Array::try_from(
-        ebpf.take_map("CONFIG").context("CONFIG map missing")?,
-    )?;
-    Ok(Maps {
-        rules,
-        default_policy,
-        config,
-    })
+    let rules: Array<MapData, Rule> =
+        Array::try_from(ebpf.take_map("RULES").context("RULES map missing")?)?;
+    let default_policy: Array<MapData, u8> =
+        Array::try_from(ebpf.take_map("DEFAULT_POLICY").context("DEFAULT_POLICY map missing")?)?;
+    let config: Array<MapData, GlobalConfig> =
+        Array::try_from(ebpf.take_map("CONFIG").context("CONFIG map missing")?)?;
+    Ok(Maps { rules, default_policy, config })
 }
 
 fn sync_all(state: &mut DaemonState) -> Result<()> {
@@ -229,14 +208,8 @@ fn sync_all(state: &mut DaemonState) -> Result<()> {
 }
 
 fn sync_defaults(state: &mut DaemonState) -> Result<()> {
-    state
-        .maps
-        .default_policy
-        .set(POLICY_IN, wire::action_byte(state.on_disk.default_in), 0)?;
-    state
-        .maps
-        .default_policy
-        .set(POLICY_OUT, wire::action_byte(state.on_disk.default_out), 0)?;
+    state.maps.default_policy.set(POLICY_IN, wire::action_byte(state.on_disk.default_in), 0)?;
+    state.maps.default_policy.set(POLICY_OUT, wire::action_byte(state.on_disk.default_out), 0)?;
     Ok(())
 }
 
@@ -256,20 +229,14 @@ fn sync_rules(state: &mut DaemonState) -> Result<()> {
         let iface_ifindex = wire::resolve_iface(ur.iface.as_deref());
         if let Some(name) = ur.iface.as_deref() {
             if iface_ifindex == moatd_common::IFACE_ABSENT {
-                warn!(
-                    iface = name,
-                    "interface not present; rule disabled until it appears"
-                );
+                warn!(iface = name, "interface not present; rule disabled until it appears");
             }
         }
         wire_rules.push(wire::build_wire_rule(ur, iface_ifindex)?);
     }
 
     for i in 0..RULES_MAX {
-        let slot = wire_rules
-            .get(i as usize)
-            .copied()
-            .unwrap_or_else(wire::empty_wire_rule);
+        let slot = wire_rules.get(i as usize).copied().unwrap_or_else(wire::empty_wire_rule);
         state.maps.rules.set(i, slot, 0)?;
     }
     Ok(())
@@ -284,10 +251,9 @@ fn bind_control_socket() -> Result<UnixListener> {
     }
     if path.exists() {
         match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => anyhow::bail!(
-                "another moatd is already running and bound to {}",
-                path.display()
-            ),
+            Ok(_) => {
+                anyhow::bail!("another moatd is already running and bound to {}", path.display())
+            }
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 std::fs::remove_file(path).context("removing stale socket")?;
             }
@@ -304,21 +270,15 @@ fn bind_control_socket() -> Result<UnixListener> {
 }
 
 async fn serve_client(mut stream: UnixStream, shared: Arc<Mutex<DaemonState>>) -> Result<()> {
-    let req = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        read_frame(&mut stream),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("client read timed out"))??;
+    let req = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut stream))
+        .await
+        .map_err(|_| anyhow::anyhow!("client read timed out"))??;
     let req: Request = serde_json::from_slice(&req).context("decoding request")?;
     let resp = dispatch(req, &shared).await;
     let resp_bytes = serde_json::to_vec(&resp)?;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        write_frame(&mut stream, &resp_bytes),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("client write timed out"))??;
+    tokio::time::timeout(std::time::Duration::from_secs(5), write_frame(&mut stream, &resp_bytes))
+        .await
+        .map_err(|_| anyhow::anyhow!("client write timed out"))??;
     Ok(())
 }
 
@@ -425,12 +385,9 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
 }
 
 async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
-    let len = u32::try_from(payload.len())
-        .context("payload exceeds u32")?
-        .to_be_bytes();
+    let len = u32::try_from(payload.len()).context("payload exceeds u32")?.to_be_bytes();
     stream.write_all(&len).await?;
     stream.write_all(payload).await?;
     stream.flush().await?;
     Ok(())
 }
-

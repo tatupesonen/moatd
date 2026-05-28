@@ -13,3 +13,6 @@ user = ["dep:aya", "dep:serde"]
 aya = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 bytemuck = { workspace = true }
+
+[lints]
+workspace = true

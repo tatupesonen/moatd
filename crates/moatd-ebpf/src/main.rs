@@ -70,10 +70,7 @@ pub fn moat_egress(ctx: TcContext) -> i32 {
 
 #[inline(always)]
 unsafe fn ptr_at_data<T>(data: usize, data_end: usize, offset: usize) -> Result<*const T, ()> {
-    let end = data
-        .checked_add(offset)
-        .and_then(|x| x.checked_add(mem::size_of::<T>()))
-        .ok_or(())?;
+    let end = data.checked_add(offset).and_then(|x| x.checked_add(mem::size_of::<T>())).ok_or(())?;
     if end > data_end {
         return Err(());
     }
@@ -112,11 +109,7 @@ fn try_ingress(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     let chosen = walk_rules(DIR_IN, ifindex, &parsed);
-    Ok(if chosen == ACT_ALLOW {
-        xdp_action::XDP_PASS
-    } else {
-        xdp_action::XDP_DROP
-    })
+    Ok(if chosen == ACT_ALLOW { xdp_action::XDP_PASS } else { xdp_action::XDP_DROP })
 }
 
 fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
@@ -155,17 +148,13 @@ fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
 fn is_ndp(p: &Parsed) -> bool {
     p.family == FAMILY_V6
         && p.proto_byte == PROTO_ICMPV6
-        && matches!(
-            p.icmp_type,
-            ICMPV6_RS | ICMPV6_RA | ICMPV6_NS | ICMPV6_NA | ICMPV6_REDIRECT
-        )
+        && matches!(p.icmp_type, ICMPV6_RS | ICMPV6_RA | ICMPV6_NS | ICMPV6_NA | ICMPV6_REDIRECT)
 }
 
 #[inline(always)]
 fn parse_packet(data: usize, data_end: usize) -> Result<Option<Parsed>, ()> {
     let eth: *const EthHdr = unsafe { ptr_at_data(data, data_end, 0)? };
-    let ether_type =
-        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*eth).ether_type)) };
+    let ether_type = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*eth).ether_type)) };
     match ether_type {
         EtherType::Ipv4 => parse_v4(data, data_end),
         EtherType::Ipv6 => parse_v6(data, data_end),
@@ -285,11 +274,7 @@ fn cidr_contains_v4(cidr: &IpCidr, addr: &[u8; 16]) -> bool {
     }
     let cidr_word = u32::from_be_bytes([cidr.addr[0], cidr.addr[1], cidr.addr[2], cidr.addr[3]]);
     let addr_word = u32::from_be_bytes([addr[0], addr[1], addr[2], addr[3]]);
-    let mask: u32 = if prefix >= 32 {
-        u32::MAX
-    } else {
-        u32::MAX << (32 - prefix)
-    };
+    let mask: u32 = if prefix >= 32 { u32::MAX } else { u32::MAX << (32 - prefix) };
     (cidr_word & mask) == (addr_word & mask)
 }
 

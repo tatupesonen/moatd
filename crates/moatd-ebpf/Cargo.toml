@@ -17,3 +17,16 @@ which = { version = "8", default-features = false, features = ["real-sys"] }
 [[bin]]
 name = "moatd-bpf"
 path = "src/main.rs"
+
+# eBPF crate doesn't inherit the workspace lints — pedantic is too noisy on
+# packet-parsing idioms (heavy unsafe, casts, raw pointer reads). We keep the
+# correctness/style/perf groups and a handful of restriction lints that still
+# catch real bugs.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+panic       = "warn"
+todo        = "warn"

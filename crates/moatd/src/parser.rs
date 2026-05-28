@@ -122,9 +122,27 @@ fn validate_iface(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn parse_default_args(args: &[String]) -> Result<(Direction, Action)> {
+    if args.len() != 2 {
+        bail!("usage: moat default <allow|deny|reject> <incoming|outgoing>");
+    }
+    let action = match args[0].to_ascii_lowercase().as_str() {
+        "allow" => Action::Allow,
+        "deny" => Action::Deny,
+        "reject" => Action::Reject,
+        other => bail!("unknown action `{other}`"),
+    };
+    let direction = match args[1].to_ascii_lowercase().as_str() {
+        "in" | "incoming" => Direction::In,
+        "out" | "outgoing" => Direction::Out,
+        other => bail!("unknown direction `{other}`"),
+    };
+    Ok((direction, action))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{parse_default_args, parse_rule_spec, Action, Direction, Protocol};
 
     fn tok(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -188,31 +206,10 @@ mod tests {
 
     #[test]
     fn v6_cidr_in_grammar() {
-        let r = parse_rule_spec(
-            Action::Deny,
-            &tok("in from fe80::/10 to any port 80 proto tcp"),
-        )
-        .unwrap();
+        let r = parse_rule_spec(Action::Deny, &tok("in from fe80::/10 to any port 80 proto tcp"))
+            .unwrap();
         assert_eq!(r.src.as_deref(), Some("fe80::/10"));
         assert_eq!(r.dst_port.as_deref(), Some("80"));
         assert_eq!(r.proto, Some(Protocol::Tcp));
     }
-}
-
-pub fn parse_default_args(args: &[String]) -> Result<(Direction, Action)> {
-    if args.len() != 2 {
-        bail!("usage: moat default <allow|deny|reject> <incoming|outgoing>");
-    }
-    let action = match args[0].to_ascii_lowercase().as_str() {
-        "allow" => Action::Allow,
-        "deny" => Action::Deny,
-        "reject" => Action::Reject,
-        other => bail!("unknown action `{other}`"),
-    };
-    let direction = match args[1].to_ascii_lowercase().as_str() {
-        "in" | "incoming" => Direction::In,
-        "out" | "outgoing" => Direction::Out,
-        other => bail!("unknown direction `{other}`"),
-    };
-    Ok((direction, action))
 }

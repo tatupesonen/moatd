@@ -18,11 +18,13 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Install Rust nightly (for eBPF)
         uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rust-src
+          components: rust-src, clippy
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -40,6 +42,15 @@ jobs:
           if ! command -v bpf-linker >/dev/null 2>&1; then
             cargo install bpf-linker --locked
           fi
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (userspace)
+        run: cargo clippy -p moatd -p moatd-common --features "moatd-common/user" --all-targets -- -D warnings
+
+      - name: Clippy (eBPF)
+        run: rustup run nightly cargo clippy -p moatd-ebpf --target bpfel-unknown-none -Zbuild-std=core --release -- -D warnings
 
       - name: Build
         run: cargo build --workspace --exclude moatd-ebpf

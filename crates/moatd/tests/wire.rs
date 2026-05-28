@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use moatd_common::control::{Action, Direction, Protocol, UserRule};
 use moatd_common::{FAMILY_V4, FAMILY_V6, IFACE_ANY, PROTO_TCP};
 

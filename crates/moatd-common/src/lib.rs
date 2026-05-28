@@ -131,7 +131,7 @@ pub struct ConnVal {
 
 #[cfg(feature = "user")]
 mod aya_impls {
-    use super::*;
+    use super::{ConnKey, ConnVal, DropEvent, GlobalConfig, IpCidr, Rule};
     unsafe impl aya::Pod for Rule {}
     unsafe impl aya::Pod for IpCidr {}
     unsafe impl aya::Pod for DropEvent {}

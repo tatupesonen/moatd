@@ -8,10 +8,7 @@ use moatd_common::{
     IFACE_ANY, PROTO_ANY, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, SCHEMA_VERSION,
 };
 
-pub fn build_wire_rule(
-    user: &UserRule,
-    iface_ifindex: u32,
-) -> Result<moatd_common::Rule> {
+pub fn build_wire_rule(user: &UserRule, iface_ifindex: u32) -> Result<moatd_common::Rule> {
     let parsed_src = user.src.as_deref().map(parse_cidr).transpose()?;
     let parsed_dst = user.dst.as_deref().map(parse_cidr).transpose()?;
 
@@ -121,12 +118,7 @@ pub fn parse_cidr(s: &str) -> Result<moatd_common::IpCidr> {
         }
         let mut bytes = [0u8; 16];
         bytes[..4].copy_from_slice(&addr.octets());
-        return Ok(moatd_common::IpCidr {
-            family: FAMILY_V4,
-            prefix,
-            _pad: [0; 2],
-            addr: bytes,
-        });
+        return Ok(moatd_common::IpCidr { family: FAMILY_V4, prefix, _pad: [0; 2], addr: bytes });
     }
     if let Ok(addr) = Ipv6Addr::from_str(addr_s) {
         let prefix = match prefix_s {
