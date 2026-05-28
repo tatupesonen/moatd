@@ -1,31 +1,261 @@
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aya::{
-    include_bytes_aligned,
+    Ebpf, include_bytes_aligned,
     maps::{Array, MapData},
-    programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
-    Ebpf,
+    programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags, tc},
 };
+use clap::{Parser, Subcommand};
 use moatd_common::control::{
-    Action, Direction, Request, Response, StatusReport, UserRule, SOCKET_PATH,
+    Action, Direction, Request, Response, SOCKET_PATH, StatusReport, UserRule,
 };
-use moatd_common::{GlobalConfig, Rule, POLICY_IN, POLICY_OUT, RULES_MAX, SCHEMA_VERSION};
+use moatd_common::{GlobalConfig, POLICY_IN, POLICY_OUT, RULES_MAX, Rule, SCHEMA_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use moatd::parser;
 use moatd::store::{self, OnDisk, RULES_FILE};
 use moatd::wire;
 
 const XDP_PROG: &str = "moat_ingress";
 const TC_PROG: &str = "moat_egress";
 const MAX_FRAME_BYTES: usize = 1 << 20;
+
+#[derive(Parser)]
+#[command(name = "moatd", version, about = "ufw-style eBPF firewall (CLI + daemon)")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the firewall daemon (invoked by the systemd unit).
+    Daemon,
+    /// Enable and start the moatd service.
+    Enable,
+    /// Disable and stop the moatd service.
+    Disable,
+    /// Show firewall status, defaults and attached interfaces.
+    Status,
+    /// List numbered rules.
+    List,
+    /// Add an allow rule, e.g. `moatd allow 22/tcp` or
+    /// `moatd allow in on tailscale0 to any port 22 proto tcp`.
+    Allow {
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        spec: Vec<String>,
+    },
+    /// Add a deny rule.
+    Deny {
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        spec: Vec<String>,
+    },
+    /// Add a reject rule (currently treated as deny in XDP, phase 5 adds true reject).
+    Reject {
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        spec: Vec<String>,
+    },
+    /// Set default policy, e.g. `moatd default deny incoming`.
+    Default {
+        #[arg(trailing_var_arg = true, num_args = 2)]
+        args: Vec<String>,
+    },
+    /// Delete rule N (1-based).
+    Delete { index: u32 },
+    /// Reset all rules and defaults to allow-all.
+    Reset,
+    /// Toggle block logging to journald.
+    Logging { value: String },
+    /// Ping the daemon.
+    Ping,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Daemon => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            rt.block_on(run_daemon())
+        }
+        Cmd::Enable => enable(),
+        Cmd::Disable => disable(),
+        Cmd::Status => status(),
+        Cmd::List => list(),
+        Cmd::Allow { spec } => add(Action::Allow, &spec),
+        Cmd::Deny { spec } => add(Action::Deny, &spec),
+        Cmd::Reject { spec } => add(Action::Reject, &spec),
+        Cmd::Default { args } => {
+            let (direction, action) = parser::parse_default_args(&args)?;
+            simple_ok(call(&Request::SetDefault { direction, action })?, "default updated")
+        }
+        Cmd::Delete { index } => simple_ok(call(&Request::DeleteRule(index))?, "rule deleted"),
+        Cmd::Reset => simple_ok(call(&Request::Reset)?, "firewall reset"),
+        Cmd::Logging { value } => {
+            let enabled = match value.as_str() {
+                "on" | "true" | "yes" => true,
+                "off" | "false" | "no" => false,
+                _ => anyhow::bail!("logging value must be on/off"),
+            };
+            simple_ok(call(&Request::SetLogging { enabled })?, "logging updated")
+        }
+        Cmd::Ping => ping(),
+    }
+}
+
+// =====================================================================
+// CLI dispatch (sync, talks to the daemon over /run/moatd/control.sock)
+// =====================================================================
+
+fn enable() -> Result<()> {
+    run_systemctl(&["enable", "--now", "moatd"])?;
+    println!("moatd enabled");
+    Ok(())
+}
+
+fn disable() -> Result<()> {
+    run_systemctl(&["disable", "--now", "moatd"])?;
+    println!("moatd disabled");
+    Ok(())
+}
+
+fn status() -> Result<()> {
+    match call(&Request::Status)? {
+        Response::Status(s) => {
+            println!("Status:      {}", if s.active { "active" } else { "inactive" });
+            println!("Schema:      v{}", s.schema_version);
+            println!("Default in:  {:?}", s.default_in);
+            println!("Default out: {:?}", s.default_out);
+            println!("Logging:     {}", if s.logging_enabled { "on" } else { "off" });
+            println!("Rules:       {}", s.rules);
+            if s.attached_interfaces.is_empty() {
+                println!("Interfaces:  (none)");
+            } else {
+                println!("Interfaces:");
+                for i in &s.attached_interfaces {
+                    println!("  {i}");
+                }
+            }
+            Ok(())
+        }
+        Response::Err(e) => anyhow::bail!("daemon error: {e}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+fn list() -> Result<()> {
+    match call(&Request::ListRules)? {
+        Response::Rules(rs) => {
+            if rs.is_empty() {
+                println!("(no rules)");
+                return Ok(());
+            }
+            for (i, r) in rs.iter().enumerate() {
+                println!("[{}] {}", i + 1, render_rule(r));
+            }
+            Ok(())
+        }
+        Response::Err(e) => anyhow::bail!("daemon error: {e}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+fn add(action: Action, spec: &[String]) -> Result<()> {
+    let rule = parser::parse_rule_spec(action, spec)?;
+    simple_ok(call(&Request::AddRule(rule))?, "rule added")
+}
+
+fn ping() -> Result<()> {
+    match call(&Request::Ping)? {
+        Response::Pong => {
+            println!("pong");
+            Ok(())
+        }
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+fn simple_ok(resp: Response, msg: &str) -> Result<()> {
+    match resp {
+        Response::Ok => {
+            println!("{msg}");
+            Ok(())
+        }
+        Response::Err(e) => anyhow::bail!("daemon error: {e}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+fn render_rule(r: &UserRule) -> String {
+    let mut parts = vec![format!("{:?} {:?}", r.action, r.direction).to_lowercase()];
+    if let Some(iface) = &r.iface {
+        parts.push(format!("on {iface}"));
+    }
+    if let Some(src) = &r.src {
+        parts.push(format!("from {src}"));
+    }
+    if let Some(sp) = &r.src_port {
+        parts.push(format!("src port {sp}"));
+    }
+    if let Some(dst) = &r.dst {
+        parts.push(format!("to {dst}"));
+    }
+    if let Some(dp) = &r.dst_port {
+        parts.push(format!("port {dp}"));
+    }
+    if let Some(proto) = r.proto {
+        parts.push(format!("proto {proto:?}").to_lowercase());
+    }
+    parts.join(" ")
+}
+
+fn run_systemctl(args: &[&str]) -> Result<()> {
+    let status = Command::new("systemctl").args(args).status().context("invoking systemctl")?;
+    if !status.success() {
+        anyhow::bail!("systemctl {} failed (exit {})", args.join(" "), status);
+    }
+    Ok(())
+}
+
+fn call(req: &Request) -> Result<Response> {
+    let mut stream = StdUnixStream::connect(SOCKET_PATH)
+        .with_context(|| format!("connecting to {SOCKET_PATH} (is moatd running?)"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+    let bytes = serde_json::to_vec(req)?;
+    let len = u32::try_from(bytes.len()).context("request too large")?.to_be_bytes();
+    stream.write_all(&len)?;
+    stream.write_all(&bytes)?;
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let resp_len = u32::from_be_bytes(len_buf) as usize;
+    if resp_len > MAX_FRAME_BYTES {
+        anyhow::bail!("response too large: {resp_len} bytes");
+    }
+    let mut buf = vec![0u8; resp_len];
+    stream.read_exact(&mut buf)?;
+    serde_json::from_slice(&buf).context("decoding response")
+}
+
+// =====================================================================
+// Daemon
+// =====================================================================
 
 struct Maps {
     rules: Array<MapData, Rule>,
@@ -39,9 +269,8 @@ struct DaemonState {
     maps: Maps,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<()> {
-    init_tracing();
+async fn run_daemon() -> Result<()> {
+    init_daemon_tracing();
 
     let ebpf_bytes = include_bytes_aligned!(concat!(env!("OUT_DIR"), "/moatd-bpf"));
     let mut ebpf = Ebpf::load(ebpf_bytes).context("loading eBPF object")?;
@@ -140,7 +369,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+fn init_daemon_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -245,22 +474,21 @@ fn sync_rules(state: &mut DaemonState) -> Result<()> {
 fn bind_control_socket() -> Result<UnixListener> {
     let path = Path::new(SOCKET_PATH);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750));
     }
     if path.exists() {
-        match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => {
-                anyhow::bail!("another moatd is already running and bound to {}", path.display())
-            }
+        match StdUnixStream::connect(path) {
+            Ok(_) => anyhow::bail!(
+                "another moatd is already running and bound to {}",
+                path.display()
+            ),
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 std::fs::remove_file(path).context("removing stale socket")?;
             }
             Err(e) => return Err(anyhow::anyhow!("probing existing socket: {e}")),
         }
     }
-    // Restrict mode at creation time, not after, so there's no world-accessible window.
     let prev = unsafe { libc::umask(0o117) };
     let listener_result = UnixListener::bind(path);
     unsafe { libc::umask(prev) };
@@ -270,13 +498,13 @@ fn bind_control_socket() -> Result<UnixListener> {
 }
 
 async fn serve_client(mut stream: UnixStream, shared: Arc<Mutex<DaemonState>>) -> Result<()> {
-    let req = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut stream))
+    let req = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
         .await
         .map_err(|_| anyhow::anyhow!("client read timed out"))??;
     let req: Request = serde_json::from_slice(&req).context("decoding request")?;
     let resp = dispatch(req, &shared).await;
     let resp_bytes = serde_json::to_vec(&resp)?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), write_frame(&mut stream, &resp_bytes))
+    tokio::time::timeout(Duration::from_secs(5), write_frame(&mut stream, &resp_bytes))
         .await
         .map_err(|_| anyhow::anyhow!("client write timed out"))??;
     Ok(())

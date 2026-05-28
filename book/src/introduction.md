@@ -8,14 +8,15 @@
 eBPF (XDP for ingress, TC clsact for egress) and exposes a ufw-style CLI for
 configuration.
 
-Two binaries:
+One binary, two roles:
 
-- **`moatd`** is the daemon. It loads the eBPF programs, owns the BPF maps,
-  watches `/run/moatd/control.sock`, and persists rules to
-  `/etc/moatd/rules.toml`. Run under systemd via `moatd.service`.
-- **`moat`** is the CLI. It talks to `moatd` over the control socket. Commands
-  look like `moat allow 22/tcp`, `moat default deny incoming`,
-  `moat allow in on tailscale0 to any port 22 proto tcp`.
+- **`moatd daemon`** runs the firewall: loads the eBPF programs, owns the BPF
+  maps, watches `/run/moatd/control.sock`, persists rules to
+  `/etc/moatd/rules.toml`. Invoked by `moatd.service`.
+- **`moatd <subcommand>`** is the CLI: it talks to the running daemon over
+  the control socket. Commands look like `moatd allow 22/tcp`,
+  `moatd default deny incoming`,
+  `moatd allow in on tailscale0 to any port 22 proto tcp`.
 
 ## Why eBPF
 

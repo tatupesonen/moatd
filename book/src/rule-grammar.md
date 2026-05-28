@@ -1,13 +1,13 @@
 # Rule Grammar
 
-`moat` accepts rule specs in two forms: a shorthand and a full grammar.
+`moatd` accepts rule specs in two forms: a shorthand and a full grammar.
 
 ## Shorthand
 
 ```
-moat allow 22                  # implicit port 22, any proto
-moat allow 53/udp              # port 53 over UDP
-moat deny 25                   # block port 25
+moatd allow 22                  # implicit port 22, any proto
+moatd allow 53/udp              # port 53 over UDP
+moatd deny 25                   # block port 25
 ```
 
 Used when the only thing you want to express is a destination port (and
@@ -37,18 +37,18 @@ Where:
 
 ```sh
 # SSH only from the Tailscale subnet, only when arriving on tailscale0
-moat allow in on tailscale0 from 100.64.0.0/10 to any port 22 proto tcp
+moatd allow in on tailscale0 from 100.64.0.0/10 to any port 22 proto tcp
 
 # Outbound DNS only to 1.1.1.1 and 8.8.8.8
-moat default deny outgoing
-moat allow out to 1.1.1.1 port 53 proto udp
-moat allow out to 8.8.8.8 port 53 proto udp
+moatd default deny outgoing
+moatd allow out to 1.1.1.1 port 53 proto udp
+moatd allow out to 8.8.8.8 port 53 proto udp
 
 # Block a known-bad source
-moat deny in from 198.51.100.7 to any
+moatd deny in from 198.51.100.7 to any
 
 # Open ephemeral port range for QUIC
-moat allow in port 50000-60000 proto udp
+moatd allow in port 50000-60000 proto udp
 ```
 
 ## How rules are evaluated
@@ -64,7 +64,7 @@ moat allow in port 50000-60000 proto udp
 ## Wildcards
 
 A rule with no `from` or `to` matches any source and destination, **and**
-any address family. This is unlike strict-family firewalls — `moat allow 80/tcp`
+any address family. This is unlike strict-family firewalls — `moatd allow 80/tcp`
 allows both v4 and v6 inbound traffic to port 80, matching ufw's behavior.
 
 If you supply an explicit CIDR (`from 10.0.0.0/8`), the rule is locked to

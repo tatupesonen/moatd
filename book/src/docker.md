@@ -32,7 +32,7 @@ So for an external connection to `host_ip:8080` that Docker would DNAT to
 
 ```sh
 # Default deny + no rule for port 8080
-sudo moat default deny incoming
+sudo moatd default deny incoming
 sudo docker run -d -p 8080:80 nginx
 curl http://host_ip:8080   # ← blocked by moatd, never reaches nginx
 ```

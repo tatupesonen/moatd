@@ -37,7 +37,7 @@ This copies:
 | From | To | Purpose |
 | --- | --- | --- |
 | `target/release/moatd` | `/usr/local/sbin/moatd` | daemon |
-| `target/release/moat` | `/usr/local/bin/moat` | CLI |
+| `/usr/local/sbin/moatd` | `/usr/local/bin/moatd` | symlink so the CLI is in `$PATH` |
 | `dist/moatd.service` | `/etc/systemd/system/moatd.service` | systemd unit |
 | `dist/modules-load.d/moatd.conf` | `/etc/modules-load.d/moatd.conf` | (currently empty stub) |
 
@@ -45,14 +45,14 @@ Then reload systemd and enable the firewall:
 
 ```sh
 sudo systemctl daemon-reload
-sudo moat enable    # equivalent to: systemctl enable --now moatd
+sudo moatd enable    # equivalent to: systemctl enable --now moatd
 ```
 
 ## Verify
 
 ```sh
-moat ping     # → pong
-moat status   # active, default allow, attached interfaces
+moatd ping     # → pong
+moatd status   # active, default allow, attached interfaces
 sudo bpftool net show
 ```
 
@@ -62,7 +62,7 @@ each interface moatd attached to.
 ## Uninstall
 
 ```sh
-sudo moat disable
+sudo moatd disable
 sudo make uninstall
 sudo rm -rf /etc/moatd /var/lib/moatd /run/moatd
 ```

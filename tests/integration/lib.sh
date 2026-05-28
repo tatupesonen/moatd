@@ -27,7 +27,6 @@ PREFIX_V6="${PREFIX_V6:-64}"
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$LIB_DIR/../.." && pwd)"
 MOATD_BIN="${MOATD_BIN:-$REPO_ROOT/target/debug/moatd}"
-MOAT_BIN="${MOAT_BIN:-$REPO_ROOT/target/debug/moat}"
 
 MOATD_PID=
 LISTENER_PID=
@@ -62,11 +61,11 @@ setup_netns() {
 
 start_moatd() {
     rm -f /run/moatd/control.sock
-    ip netns exec "$NS_H" env MOAT_INTERFACES="$IFACE_H" "$MOATD_BIN" \
+    ip netns exec "$NS_H" env MOAT_INTERFACES="$IFACE_H" "$MOATD_BIN" daemon \
         > "/tmp/moatd-${NS_H}.log" 2>&1 &
     MOATD_PID=$!
     for _ in $(seq 1 50); do
-        if [ -S /run/moatd/control.sock ] && "$MOAT_BIN" ping >/dev/null 2>&1; then
+        if [ -S /run/moatd/control.sock ] && "$MOATD_BIN" ping >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
@@ -99,7 +98,7 @@ cleanup() {
 }
 
 moat_cli() {
-    "$MOAT_BIN" "$@"
+    "$MOATD_BIN" "$@"
 }
 
 # nc_to_host_v4 PORT [TIMEOUT=2]

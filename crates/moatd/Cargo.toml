@@ -6,10 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "moat"
-path = "src/bin/moat.rs"
-
-[[bin]]
 name = "moatd"
 path = "src/bin/moatd.rs"
 

@@ -8,33 +8,33 @@ group (planned; today the socket is root-only).
 
 | Command | What it does |
 | --- | --- |
-| `moat enable` | `systemctl enable --now moatd` |
-| `moat disable` | `systemctl disable --now moatd` |
-| `moat status` | print defaults, attached interfaces, rule count |
-| `moat ping` | round-trip health check |
-| `moat reset` | wipe all rules and restore allow/allow defaults |
+| `moatd enable` | `systemctl enable --now moatd` |
+| `moatd disable` | `systemctl disable --now moatd` |
+| `moatd status` | print defaults, attached interfaces, rule count |
+| `moatd ping` | round-trip health check |
+| `moatd reset` | wipe all rules and restore allow/allow defaults |
 
 ## Rules
 
 | Command | Example |
 | --- | --- |
-| `moat allow <spec>` | `moat allow 22/tcp` |
-| `moat deny <spec>` | `moat deny in port 80 proto tcp` |
-| `moat reject <spec>` | `moat reject 25/tcp` (treated as drop until phase 5) |
-| `moat list` | numbered list of all rules |
-| `moat delete N` | delete the 1-indexed rule at position N |
+| `moatd allow <spec>` | `moatd allow 22/tcp` |
+| `moatd deny <spec>` | `moatd deny in port 80 proto tcp` |
+| `moatd reject <spec>` | `moatd reject 25/tcp` (treated as drop until phase 5) |
+| `moatd list` | numbered list of all rules |
+| `moatd delete N` | delete the 1-indexed rule at position N |
 
 ## Default policies
 
 ```sh
-moat default <allow|deny|reject> <incoming|outgoing>
+moatd default <allow|deny|reject> <incoming|outgoing>
 ```
 
 For example:
 
 ```sh
-moat default deny incoming
-moat default allow outgoing
+moatd default deny incoming
+moatd default allow outgoing
 ```
 
 `incoming` / `outgoing` (or `in` / `out`) controls which direction's default
@@ -43,8 +43,8 @@ changes.
 ## Logging
 
 ```sh
-moat logging on
-moat logging off
+moatd logging on
+moatd logging off
 ```
 
 The eBPF program emits one event per dropped packet to a ringbuf; the daemon

@@ -9,7 +9,7 @@ Wants=network-pre.target
 
 [Service]
 Type=notify
-ExecStart=/usr/local/sbin/moatd
+ExecStart=/usr/local/sbin/moatd daemon
 Restart=on-failure
 RestartSec=2s
 

@@ -6,7 +6,7 @@ This is a five-minute walk-through. Assumes you've already
 ## 1. Enable
 
 ```sh
-sudo moat enable
+sudo moatd enable
 ```
 
 This calls `systemctl enable --now moatd`. The daemon attaches XDP + TC
@@ -19,7 +19,7 @@ as a no-op.
 ## 2. Look around
 
 ```sh
-moat status
+moatd status
 ```
 
 ```
@@ -37,9 +37,9 @@ Interfaces:
 ## 3. Allow specific services
 
 ```sh
-sudo moat allow 22/tcp
-sudo moat allow 443/tcp
-sudo moat list
+sudo moatd allow 22/tcp
+sudo moatd allow 443/tcp
+sudo moatd list
 ```
 
 ```
@@ -53,7 +53,7 @@ sudo moat list
 > you're connected over SSH, `allow 22/tcp` first.
 
 ```sh
-sudo moat default deny incoming
+sudo moatd default deny incoming
 ```
 
 Existing flows survive because outbound packets populate the conntrack and
@@ -65,8 +65,8 @@ without a rule are dropped at XDP.
 If you want SSH to be reachable only over Tailscale:
 
 ```sh
-sudo moat delete 1
-sudo moat allow in on tailscale0 to any port 22 proto tcp
+sudo moatd delete 1
+sudo moatd allow in on tailscale0 to any port 22 proto tcp
 ```
 
 `tailscale0` doesn't need to exist when you add the rule. When the interface
@@ -85,7 +85,7 @@ The `CONNTRACK` map should fill up as outbound flows establish.
 ## 7. Reset
 
 ```sh
-sudo moat reset
+sudo moatd reset
 ```
 
 Clears rules and restores allow/allow defaults. The state on disk is also
