@@ -27,6 +27,7 @@ sd-notify = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
+bytemuck = { workspace = true }
 
 [build-dependencies]
 aya-build = { workspace = true }

@@ -7,13 +7,14 @@ use aya_ebpf::{
     bindings::{xdp_action, TC_ACT_PIPE, TC_ACT_SHOT},
     helpers::bpf_ktime_get_ns,
     macros::{classifier, map, xdp},
-    maps::{Array, LruHashMap},
+    maps::{Array, LruHashMap, PerCpuArray, RingBuf},
     programs::{TcContext, XdpContext},
 };
 use moatd_common::{
-    ConnKey, ConnVal, GlobalConfig, IpCidr, Rule, ACT_ALLOW, CONNTRACK_MAX_ENTRIES,
-    CONNTRACK_TTL_NS, DIR_IN, DIR_OUT, FAMILY_V4, FAMILY_V6, IFACE_ANY, POLICY_IN, POLICY_OUT,
-    PROTO_ANY, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, RULES_MAX,
+    ConnKey, ConnVal, DropEvent, GlobalConfig, IpCidr, LogTokens, Rule, ACT_ALLOW,
+    CONNTRACK_MAX_ENTRIES, CONNTRACK_TTL_NS, DIR_IN, DIR_OUT, FAMILY_V4, FAMILY_V6, IFACE_ANY,
+    LOG_BUCKET_MAX, LOG_BUCKET_REFILL_NS, POLICY_IN, POLICY_OUT, PROTO_ANY, PROTO_ICMP,
+    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, RULES_MAX, RULE_ID_DEFAULT,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -34,6 +35,12 @@ static CONFIG: Array<GlobalConfig> = Array::with_max_entries(1, 0);
 #[map]
 static CONNTRACK: LruHashMap<ConnKey, ConnVal> =
     LruHashMap::with_max_entries(CONNTRACK_MAX_ENTRIES, 0);
+
+#[map]
+static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+#[map]
+static LOG_TOKENS: PerCpuArray<LogTokens> = PerCpuArray::with_max_entries(1, 0);
 
 #[derive(Copy, Clone)]
 struct Parsed {
@@ -108,8 +115,13 @@ fn try_ingress(ctx: &XdpContext) -> Result<u32, ()> {
         }
     }
 
-    let chosen = walk_rules(DIR_IN, ifindex, &parsed);
-    Ok(if chosen == ACT_ALLOW { xdp_action::XDP_PASS } else { xdp_action::XDP_DROP })
+    let (chosen, rule_id) = walk_rules(DIR_IN, ifindex, &parsed);
+    if chosen == ACT_ALLOW {
+        Ok(xdp_action::XDP_PASS)
+    } else {
+        emit_drop(ifindex, &parsed, rule_id);
+        Ok(xdp_action::XDP_DROP)
+    }
 }
 
 fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
@@ -125,8 +137,9 @@ fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_PIPE);
     }
 
-    let chosen = walk_rules(DIR_OUT, ifindex, &parsed);
+    let (chosen, rule_id) = walk_rules(DIR_OUT, ifindex, &parsed);
     if chosen != ACT_ALLOW {
+        emit_drop(ifindex, &parsed, rule_id);
         return Ok(TC_ACT_SHOT);
     }
 
@@ -307,8 +320,9 @@ fn cidr_contains_v6(cidr: &IpCidr, addr: &[u8; 16]) -> bool {
 }
 
 #[inline(always)]
-fn walk_rules(direction: u8, ifindex: u32, p: &Parsed) -> u8 {
+fn walk_rules(direction: u8, ifindex: u32, p: &Parsed) -> (u8, u32) {
     let mut chosen: u8 = u8::MAX;
+    let mut matched_id: u32 = RULE_ID_DEFAULT;
     for i in 0..RULES_MAX {
         if chosen != u8::MAX {
             break;
@@ -343,13 +357,71 @@ fn walk_rules(direction: u8, ifindex: u32, p: &Parsed) -> u8 {
             continue;
         }
         chosen = rule.action;
+        matched_id = i;
     }
 
     if chosen == u8::MAX {
         let slot = if direction == DIR_IN { POLICY_IN } else { POLICY_OUT };
         chosen = DEFAULT_POLICY.get(slot).copied().unwrap_or(ACT_ALLOW);
+        matched_id = RULE_ID_DEFAULT;
     }
-    chosen
+    (chosen, matched_id)
+}
+
+#[inline(always)]
+fn logging_enabled() -> bool {
+    CONFIG.get(0).map(|c| c.logging_enabled).unwrap_or(0) != 0
+}
+
+#[inline(always)]
+fn try_take_token() -> bool {
+    let Some(ptr) = LOG_TOKENS.get_ptr_mut(0) else {
+        return false;
+    };
+    let now = unsafe { bpf_ktime_get_ns() };
+    // SAFETY: per-CPU array slot; no contention on the same CPU.
+    let bucket = unsafe { &mut *ptr };
+    let elapsed = now.saturating_sub(bucket.last_refill_ns);
+    if elapsed >= LOG_BUCKET_REFILL_NS {
+        let new_tokens = (elapsed / LOG_BUCKET_REFILL_NS) as u32;
+        let total = bucket.tokens.saturating_add(new_tokens);
+        bucket.tokens = if total > LOG_BUCKET_MAX { LOG_BUCKET_MAX } else { total };
+        bucket.last_refill_ns = now;
+    }
+    if bucket.tokens > 0 {
+        bucket.tokens -= 1;
+        true
+    } else {
+        false
+    }
+}
+
+#[inline(always)]
+fn emit_drop(ifindex: u32, p: &Parsed, rule_id: u32) {
+    if !logging_enabled() {
+        return;
+    }
+    if !try_take_token() {
+        return;
+    }
+    let Some(mut entry) = EVENTS.reserve::<DropEvent>(0) else {
+        return;
+    };
+    let event = DropEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        ifindex,
+        rule_id,
+        src: p.src_addr,
+        dst: p.dst_addr,
+        src_port: p.src_port,
+        dst_port: p.dst_port,
+        proto: p.proto_byte,
+        family: p.family,
+        tcp_flags: 0,
+        _pad: 0,
+    };
+    entry.write(event);
+    entry.submit(0);
 }
 
 #[cfg(not(test))]

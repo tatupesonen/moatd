@@ -30,6 +30,10 @@ pub const IFACE_ABSENT: u32 = u32::MAX;
 pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
 pub const CONNTRACK_TTL_NS: u64 = 60_000_000_000;
 
+pub const LOG_BUCKET_MAX: u32 = 100;
+pub const LOG_BUCKET_REFILL_NS: u64 = 10_000_000; // ~100 tokens/s/CPU
+pub const RULE_ID_DEFAULT: u32 = u32::MAX;
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct IpCidr {
@@ -129,15 +133,24 @@ pub struct ConnVal {
     pub last_seen_ns: u64,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LogTokens {
+    pub tokens: u32,
+    pub _pad: [u8; 4],
+    pub last_refill_ns: u64,
+}
+
 #[cfg(feature = "user")]
 mod aya_impls {
-    use super::{ConnKey, ConnVal, DropEvent, GlobalConfig, IpCidr, Rule};
+    use super::{ConnKey, ConnVal, DropEvent, GlobalConfig, IpCidr, LogTokens, Rule};
     unsafe impl aya::Pod for Rule {}
     unsafe impl aya::Pod for IpCidr {}
     unsafe impl aya::Pod for DropEvent {}
     unsafe impl aya::Pod for GlobalConfig {}
     unsafe impl aya::Pod for ConnKey {}
     unsafe impl aya::Pod for ConnVal {}
+    unsafe impl aya::Pod for LogTokens {}
 }
 
 #[cfg(feature = "user")]

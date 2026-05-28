@@ -521,6 +521,7 @@ dependencies = [
  "aya",
  "aya-build",
  "aya-log",
+ "bytemuck",
  "cargo_metadata",
  "clap",
  "env_logger",

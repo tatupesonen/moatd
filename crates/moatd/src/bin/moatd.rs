@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
@@ -8,18 +10,22 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aya::{
-    Ebpf, include_bytes_aligned,
-    maps::{Array, MapData},
-    programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags, tc},
+    include_bytes_aligned,
+    maps::{ring_buf::RingBuf, Array, MapData},
+    programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
+    Ebpf,
 };
 use clap::{Parser, Subcommand};
 use moatd_common::control::{
-    Action, Direction, Request, Response, SOCKET_PATH, StatusReport, UserRule,
+    Action, Direction, Request, Response, StatusReport, UserRule, SOCKET_PATH,
 };
-use moatd_common::{GlobalConfig, POLICY_IN, POLICY_OUT, RULES_MAX, Rule, SCHEMA_VERSION};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use moatd_common::{
+    DropEvent, GlobalConfig, Rule, FAMILY_V4, POLICY_IN, POLICY_OUT, PROTO_ICMP, PROTO_ICMPV6,
+    PROTO_TCP, PROTO_UDP, RULES_MAX, RULE_ID_DEFAULT, SCHEMA_VERSION,
+};
+use tokio::io::{unix::AsyncFd, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -316,6 +322,14 @@ async fn run_daemon() -> Result<()> {
 
     let maps = take_maps(&mut ebpf)?;
 
+    match setup_event_drainer(&mut ebpf) {
+        Ok(fd) => {
+            tokio::spawn(drain_events(fd));
+            info!("block-event log drainer started");
+        }
+        Err(e) => warn!(error = %e, "block-event logging unavailable"),
+    }
+
     let on_disk = match store::load(RULES_FILE) {
         Ok(o) => o,
         Err(e) => {
@@ -474,15 +488,15 @@ fn sync_rules(state: &mut DaemonState) -> Result<()> {
 fn bind_control_socket() -> Result<UnixListener> {
     let path = Path::new(SOCKET_PATH);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
         let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750));
     }
     if path.exists() {
         match StdUnixStream::connect(path) {
-            Ok(_) => anyhow::bail!(
-                "another moatd is already running and bound to {}",
-                path.display()
-            ),
+            Ok(_) => {
+                anyhow::bail!("another moatd is already running and bound to {}", path.display())
+            }
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 std::fs::remove_file(path).context("removing stale socket")?;
             }
@@ -618,4 +632,135 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
     stream.write_all(payload).await?;
     stream.flush().await?;
     Ok(())
+}
+
+// =====================================================================
+// Block-event logging: drains the EVENTS ringbuf, dedupes in a 1s
+// sliding window, and emits one tracing event per (src,dst_port,proto,
+// rule,iface) bucket so journald doesn't get flooded.
+// =====================================================================
+
+fn setup_event_drainer(ebpf: &mut Ebpf) -> Result<AsyncFd<RingBuf<MapData>>> {
+    let map = ebpf.take_map("EVENTS").context("EVENTS map missing")?;
+    let rb = RingBuf::try_from(map).context("EVENTS map wrong type")?;
+    AsyncFd::new(rb).context("registering EVENTS fd with tokio")
+}
+
+async fn drain_events(mut events: AsyncFd<RingBuf<MapData>>) {
+    let mut dedupe = DedupeWindow::default();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => dedupe.flush(),
+            r = events.readable_mut() => {
+                let Ok(mut guard) = r else { continue };
+                while let Some(item) = guard.get_inner_mut().next() {
+                    let bytes: &[u8] = &item;
+                    if bytes.len() != std::mem::size_of::<DropEvent>() {
+                        continue;
+                    }
+                    let event: DropEvent = bytemuck::pod_read_unaligned(bytes);
+                    dedupe.record(event);
+                }
+                guard.clear_ready();
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct DedupeWindow {
+    entries: HashMap<DedupeKey, DedupeAccum>,
+}
+
+#[derive(Eq, PartialEq, Hash, Clone, Copy)]
+struct DedupeKey {
+    family: u8,
+    proto: u8,
+    src: [u8; 16],
+    dst_port: u16,
+    ifindex: u32,
+    rule_id: u32,
+}
+
+struct DedupeAccum {
+    count: u32,
+    sample: DropEvent,
+}
+
+impl DedupeWindow {
+    fn record(&mut self, event: DropEvent) {
+        let key = DedupeKey {
+            family: event.family,
+            proto: event.proto,
+            src: event.src,
+            dst_port: event.dst_port,
+            ifindex: event.ifindex,
+            rule_id: event.rule_id,
+        };
+        self.entries
+            .entry(key)
+            .and_modify(|a| a.count += 1)
+            .or_insert(DedupeAccum { count: 1, sample: event });
+    }
+
+    fn flush(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        for (_, accum) in self.entries.drain() {
+            let e = &accum.sample;
+            let src = format_addr(e.family, &e.src);
+            let dst = format_addr(e.family, &e.dst);
+            let proto = proto_name(e.proto);
+            let rule = if e.rule_id == RULE_ID_DEFAULT {
+                "default".to_string()
+            } else {
+                format!("rule #{}", e.rule_id + 1)
+            };
+            let iface = iface_name(e.ifindex).unwrap_or_else(|| format!("if{}", e.ifindex));
+            let plural = if accum.count == 1 { "" } else { "s" };
+            info!(
+                target: "moatd::block",
+                "BLOCK src={src} dst={dst}:{port}/{proto} on {iface} ({rule}, {count} hit{plural} in 1s)",
+                src = src,
+                dst = dst,
+                port = e.dst_port,
+                proto = proto,
+                iface = iface,
+                rule = rule,
+                count = accum.count,
+                plural = plural,
+            );
+        }
+    }
+}
+
+fn format_addr(family: u8, bytes: &[u8; 16]) -> String {
+    if family == FAMILY_V4 {
+        Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string()
+    } else {
+        Ipv6Addr::from(*bytes).to_string()
+    }
+}
+
+fn proto_name(p: u8) -> &'static str {
+    match p {
+        PROTO_TCP => "tcp",
+        PROTO_UDP => "udp",
+        PROTO_ICMP => "icmp",
+        PROTO_ICMPV6 => "icmpv6",
+        _ => "any",
+    }
+}
+
+fn iface_name(ifindex: u32) -> Option<String> {
+    let mut buf = [0u8; libc::IF_NAMESIZE];
+    let ptr = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr().cast()) };
+    if ptr.is_null() {
+        return None;
+    }
+    let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast()) };
+    cstr.to_str().ok().map(String::from)
 }
