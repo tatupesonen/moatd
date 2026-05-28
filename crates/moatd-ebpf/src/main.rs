@@ -135,21 +135,25 @@ fn try_ingress(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    let reverse_key = ConnKey {
-        proto: parsed.proto_byte,
-        family: parsed.family,
-        _pad: [0; 2],
-        src_addr: parsed.dst_addr,
-        dst_addr: parsed.src_addr,
-        src_port: parsed.dst_port,
-        dst_port: parsed.src_port,
-    };
-    if let Some(v) = unsafe { CONNTRACK.get(&reverse_key) } {
-        let now = unsafe { bpf_ktime_get_coarse_ns() };
-        if now.saturating_sub(v.last_seen_ns) < CONNTRACK_TTL_NS {
-            // Intentionally no refresh on ingress: only the egress side keeps the
-            // entry alive. Otherwise a spoofed reply could indefinitely renew it.
-            return Ok(xdp_action::XDP_PASS);
+    // Stateful only when the ruleset needs it (see write_config). When inbound
+    // is permissive there's nothing to let replies past, so skip the lookup.
+    if conntrack_enabled() {
+        let reverse_key = ConnKey {
+            proto: parsed.proto_byte,
+            family: parsed.family,
+            _pad: [0; 2],
+            src_addr: parsed.dst_addr,
+            dst_addr: parsed.src_addr,
+            src_port: parsed.dst_port,
+            dst_port: parsed.src_port,
+        };
+        if let Some(v) = unsafe { CONNTRACK.get(&reverse_key) } {
+            let now = unsafe { bpf_ktime_get_coarse_ns() };
+            if now.saturating_sub(v.last_seen_ns) < CONNTRACK_TTL_NS {
+                // No refresh on ingress: only egress keeps the entry alive, so a
+                // spoofed reply can't indefinitely renew it.
+                return Ok(xdp_action::XDP_PASS);
+            }
         }
     }
 
@@ -176,6 +180,17 @@ fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_PIPE);
     }
 
+    // Stateless fast path: when inbound doesn't need conntrack there's no reason
+    // to record outbound flows, so just evaluate the egress rules.
+    if !conntrack_enabled() {
+        let (chosen, rule_id) = walk_rules(DIR_OUT, ifindex, &parsed);
+        if chosen != ACT_ALLOW {
+            emit_drop(ifindex, &parsed, rule_id);
+            return Ok(TC_ACT_SHOT);
+        }
+        return Ok(TC_ACT_PIPE);
+    }
+
     let forward_key = ConnKey {
         proto: parsed.proto_byte,
         family: parsed.family,
@@ -187,8 +202,8 @@ fn try_egress(ctx: &TcContext) -> Result<i32, ()> {
     };
     let now = unsafe { bpf_ktime_get_coarse_ns() };
 
-    // Established outbound flow: skip the rule walk, refresh at most every
-    // CONNTRACK_REFRESH_NS. A rule added mid-flow only applies once the entry expires.
+    // Established outbound flow: refresh at most every CONNTRACK_REFRESH_NS and
+    // record it so the ingress reverse lookup can match replies.
     if let Some(v) = unsafe { CONNTRACK.get(&forward_key) } {
         let age = now.saturating_sub(v.last_seen_ns);
         if age < CONNTRACK_TTL_NS {
@@ -587,6 +602,11 @@ fn walk_rules(direction: u8, ifindex: u32, p: &Parsed) -> (u8, u32) {
 #[inline(always)]
 fn logging_enabled() -> bool {
     CONFIG.get(0).map(|c| c.logging_enabled).unwrap_or(0) != 0
+}
+
+#[inline(always)]
+fn conntrack_enabled() -> bool {
+    CONFIG.get(0).map(|c| c.conntrack_enabled).unwrap_or(1) != 0
 }
 
 #[inline(always)]

@@ -37,7 +37,10 @@ pub fn valid_iface_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 15 && !name.bytes().any(|b| b == b'/' || b == b' ' || b == 0)
 }
 
-pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
+// Sized well above the expected live-flow count so the hash stays at a low load
+// factor: a lookup miss then usually hits an empty bucket and bails, instead of
+// probing an occupied one and paying a key-compare cache miss.
+pub const CONNTRACK_MAX_ENTRIES: u32 = 262_144;
 // 2h, so idle TCP sessions (SSH, DB) survive well past typical keepalive gaps.
 // LRU eviction handles pressure; the egress-only refresh still bounds spoofing.
 pub const CONNTRACK_TTL_NS: u64 = 7_200_000_000_000;
@@ -128,7 +131,9 @@ pub struct GlobalConfig {
     pub logging_enabled: u8,
     pub log_level: u8,
     pub active_bank: u8,
-    pub _pad: u8,
+    // Conntrack is only needed when inbound is restrictive; when 0 the data path
+    // skips the per-packet conntrack lookup/insert entirely.
+    pub conntrack_enabled: u8,
     pub rule_count: u16,
     pub _pad2: u16,
 }

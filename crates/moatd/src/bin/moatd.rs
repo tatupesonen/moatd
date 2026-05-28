@@ -511,11 +511,19 @@ fn sync_defaults(state: &mut DaemonState) -> Result<()> {
 // it publishes active_bank + rule_count, so it must run only after the target
 // bank's slots are fully written.
 fn write_config(state: &mut DaemonState) -> Result<()> {
+    // Conntrack is only needed to let inbound replies past restrictive inbound
+    // filtering. If inbound allows everything, skip it for a faster data path.
+    let needs_conntrack = state.on_disk.default_in != Action::Allow
+        || state
+            .on_disk
+            .rules
+            .iter()
+            .any(|r| r.direction == Direction::In && r.action != Action::Allow);
     let cfg = GlobalConfig {
         logging_enabled: u8::from(state.on_disk.logging_enabled),
         log_level: 0,
         active_bank: state.active_bank,
-        _pad: 0,
+        conntrack_enabled: u8::from(needs_conntrack),
         rule_count: state.on_disk.rules.len().min(RULES_MAX as usize) as u16,
         _pad2: 0,
     };
