@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["moatd-common", "moatd", "moatd-ebpf"]
-default-members = ["moatd-common", "moatd"]
+members = ["crates/moatd-common", "crates/moatd", "crates/moatd-ebpf"]
+default-members = ["crates/moatd-common", "crates/moatd"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.80"
 
 [workspace.dependencies]
-moatd-common = { path = "moatd-common" }
+moatd-common = { path = "crates/moatd-common" }
 aya = "0.13"
 aya-log = "0.2"
 aya-build = "0.1"
