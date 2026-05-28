@@ -8,7 +8,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  EBPF_TOOLCHAIN: nightly-2025-04-01
 
 jobs:
   unit:
@@ -21,9 +20,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Rust nightly (for eBPF)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: ${{ env.EBPF_TOOLCHAIN }}
           components: rust-src
 
       - name: Cache cargo
@@ -60,9 +58,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Rust nightly (for eBPF)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: ${{ env.EBPF_TOOLCHAIN }}
           components: rust-src
 
       - name: Cache cargo
