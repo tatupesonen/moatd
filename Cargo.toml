@@ -6,7 +6,7 @@ default-members = ["crates/moatd-common", "crates/moatd"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 rust-version = "1.80"
 
 [workspace.dependencies]

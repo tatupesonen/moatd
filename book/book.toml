@@ -1,0 +1,12 @@
+[book]
+title = "moatd"
+authors = ["Tatu Pesonen"]
+description = "A small, fast host firewall for Linux using eBPF and a ufw-style CLI."
+src = "src"
+language = "en"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/tatupesonen/moatd"
+edit-url-template = "https://github.com/tatupesonen/moatd/edit/master/book/{path}"
